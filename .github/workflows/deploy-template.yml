@@ -100,6 +100,7 @@ on:
 
 jobs:
   deploy:
+    name: "Deploy ${{ inputs.project-name }}"
     runs-on: [ self-hosted, "${{ inputs.runner-label }}" ]
 
     env:
