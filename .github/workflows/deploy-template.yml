@@ -151,7 +151,7 @@ jobs:
             Write-Host "Backing up to $zipPath"
             Compress-Archive -Path "$env:DEPLOY_PATH\*" -DestinationPath $zipPath -Force
           } else {
-            Write-Host "No existing deployment found at $env:DEPLOY_PATH — skipping backup"
+            Write-Host "No existing deployment found at $env:DEPLOY_PATH - skipping backup"
           }
 
       # ────────────────────────────────────────────────────
