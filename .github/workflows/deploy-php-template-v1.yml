@@ -4,7 +4,7 @@
 # ที่อยู่ไฟล์: .github/workflows/deploy-template.yml
 # วิธีใช้:    ให้ caller workflow เรียกผ่าน workflow_call
 # ============================================================
-name: "[Template] Deploy to Server"
+name: "[Template] PHP Deploy to Server"
 
 on:
   workflow_call:
