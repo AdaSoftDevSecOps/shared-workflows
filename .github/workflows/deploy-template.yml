@@ -31,11 +31,11 @@ on:
       # ──────────────────────────────────────────────────────
       # Backup Config
       # ──────────────────────────────────────────────────────
-      backup-root:
-        description: "Root path สำหรับ backup"
+      backup-path:
+        description: "Backup path สำหรับ backup files"
         required: false
         type: string
-        default: "C:/X-Backup"
+        default: "C:/X-Backup/Others"
 
       # ──────────────────────────────────────────────────────
       # Configurable Preserve Files & Folders
@@ -105,9 +105,8 @@ jobs:
     env:
       PROJECT_NAME: ${{ inputs.project-name }}
       DEPLOY_PATH: ${{ inputs.deploy-path }}
-      BACKUP_ROOT: ${{ inputs.backup-root }}
-      BACKUP_PATH: "${{ inputs.backup-root }}/${{ inputs.project-name }}"
-      CONFIG_BACKUP_PATH: "${{ inputs.backup-root }}/${{ inputs.project-name }}/ConfigFile"
+      BACKUP_PATH: "${{ inputs.backup-path }}"
+      CONFIG_BACKUP_PATH: "${{ inputs.backup-path }}/ConfigFile"
       PRESERVE_FILES: ${{ inputs.preserve-files }}
       PRESERVE_FOLDERS: ${{ inputs.preserve-folders }}
       EXCLUDE_FILES: ${{ inputs.exclude-files }}
@@ -133,7 +132,7 @@ jobs:
       - name: Create backup directories
         shell: powershell
         run: |
-          @($env:BACKUP_ROOT, $env:BACKUP_PATH, $env:CONFIG_BACKUP_PATH) | ForEach-Object {
+          @($env:BACKUP_PATH, $env:CONFIG_BACKUP_PATH) | ForEach-Object {
             if (!(Test-Path -Path $_)) {
               New-Item -ItemType Directory -Path $_ -Force | Out-Null
               Write-Host "Created: $_"
@@ -161,7 +160,7 @@ jobs:
         shell: powershell
         run: |
           if (!(Test-Path -Path $env:DEPLOY_PATH)) {
-            Write-Host "No existing deployment — skipping preserve backup"
+            Write-Host "No existing deployment - skipping preserve backup"
             return
           }
 
@@ -272,7 +271,7 @@ jobs:
               Write-Host "  Restoring folder: $folder from $($latestZip.Name)"
               Expand-Archive -Path $latestZip.FullName -DestinationPath $destFolder -Force
             } else {
-              Write-Host "  No backup found for folder: $folder — skipping"
+              Write-Host "  No backup found for folder: $folder - skipping"
             }
           }
 
@@ -286,7 +285,7 @@ jobs:
         shell: powershell
         run: |
           $keepCount = ${{ inputs.backup-keep-count }}
-          Write-Host "Cleaning up — keeping last $keepCount backups"
+          Write-Host "Cleaning up - keeping last $keepCount backups"
 
           # Clean full backups
           Get-ChildItem $env:BACKUP_PATH -Filter '*.zip' -ErrorAction SilentlyContinue |
