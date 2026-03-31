@@ -115,6 +115,8 @@ jobs:
 
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 2
 
       # ────────────────────────────────────────────────────
       # Step 1: Set TIMESTAMP
@@ -141,9 +143,9 @@ jobs:
           }
 
       # ────────────────────────────────────────────────────
-      # Step 3: Selective Backup — ZIP เฉพาะไฟล์ที่จะถูก deploy ทับ
+      # Step 3: Selective Backup — ZIP เฉพาะไฟล์ที่ถูกแก้ไขจริง (git diff)
       # ────────────────────────────────────────────────────
-      - name: Backup only files that will be overwritten
+      - name: Backup only actually changed files
         shell: powershell
         run: |
           if (!(Test-Path -Path $env:DEPLOY_PATH)) {
@@ -151,70 +153,120 @@ jobs:
             return
           }
 
-          # --- Determine source path (same logic as deploy step) ---
-          $sourcePath = $env:GITHUB_WORKSPACE
+          # --- Get list of changed files from git ---
+          # fetch enough history to compare
+          git fetch origin ${{ github.event.before }} --depth=1 2>$null
+
+          $beforeSha = "${{ github.event.before }}"
+          $afterSha  = "${{ github.sha }}"
+
+          if ($beforeSha -and $beforeSha -ne '0000000000000000000000000000000000000000') {
+            # Normal push — diff between before and after
+            $changedFiles = git diff --name-only $beforeSha $afterSha 2>$null
+          } else {
+            # First push or force push — diff against parent
+            $changedFiles = git diff --name-only HEAD~1 HEAD 2>$null
+            if ($LASTEXITCODE -ne 0) {
+              # Single commit repo — list all files
+              $changedFiles = git ls-files 2>$null
+              Write-Host "::warning::Cannot determine diff, falling back to all files"
+            }
+          }
+
+          if (!$changedFiles) {
+            Write-Host "No changed files detected - skipping backup"
+            return
+          }
+
+          Write-Host "=== Changed files from git diff ==="
+          $changedFiles | ForEach-Object { Write-Host "  $_" }
+
+          # --- Determine source subfolder prefix to strip ---
+          $sourcePrefix = ""
           $customSub = "${{ inputs.source-subfolder }}"
           if ($customSub -ne '') {
-            $sourcePath = Join-Path $env:GITHUB_WORKSPACE $customSub
+            $sourcePrefix = "$customSub/"
           } elseif (Test-Path -Path (Join-Path $env:GITHUB_WORKSPACE "app")) {
-            $sourcePath = Join-Path $env:GITHUB_WORKSPACE "app"
+            $sourcePrefix = "app/"
           }
 
-          # --- Build exclude lists (same as robocopy step) ---
-          $excludeFiles = $env:EXCLUDE_FILES -split ',' | ForEach-Object { $_.Trim() } | Where-Object { $_ -ne '' }
-          $excludeFolders = $env:EXCLUDE_FOLDERS -split ',' | ForEach-Object { $_.Trim() } | Where-Object { $_ -ne '' }
-          # Also exclude preserve items — they won't be overwritten
-          $preserveFiles = $env:PRESERVE_FILES -split ',' | ForEach-Object { $_.Trim() } | Where-Object { $_ -ne '' }
+          # --- Build exclude lists ---
+          $excludeFiles   = $env:EXCLUDE_FILES -split ',' | ForEach-Object { $_.Trim() } | Where-Object { $_ -ne '' }
+          $excludeFolders  = $env:EXCLUDE_FOLDERS -split ',' | ForEach-Object { $_.Trim() } | Where-Object { $_ -ne '' }
+          $preserveFiles   = $env:PRESERVE_FILES -split ',' | ForEach-Object { $_.Trim() } | Where-Object { $_ -ne '' }
           $preserveFolders = $env:PRESERVE_FOLDERS -split ',' | ForEach-Object { $_.Trim() } | Where-Object { $_ -ne '' }
-          $allExcludeFiles = $excludeFiles + $preserveFiles | Select-Object -Unique
-          $allExcludeFolders = $excludeFolders + $preserveFolders | Select-Object -Unique
+          $allExcludeFiles   = ($excludeFiles + $preserveFiles) | Select-Object -Unique
+          $allExcludeFolders = ($excludeFolders + $preserveFolders) | Select-Object -Unique
 
-          # --- Collect files from NEW source that will overwrite existing ---
-          $newFiles = Get-ChildItem -Path $sourcePath -Recurse -File | ForEach-Object {
-            $relativePath = $_.FullName.Substring($sourcePath.Length).TrimStart('\','/')
-
-            # Skip excluded files (exact name match)
-            $fileName = $_.Name
-            if ($allExcludeFiles -contains $fileName) { return }
-
-            # Skip excluded/preserved folders
-            $skip = $false
-            foreach ($xd in $allExcludeFolders) {
-              if ($relativePath -like "$xd\*" -or $relativePath -like "$xd/*") {
-                $skip = $true
-                break
-              }
-            }
-            if ($skip) { return }
-
-            $relativePath
-          }
-
-          # --- Collect matching existing files to backup ---
+          # --- Filter changed files → only those that map to deploy path ---
           $tempBackupDir = Join-Path $env:BACKUP_PATH "_temp_selective_$env:TIMESTAMP"
           New-Item -ItemType Directory -Path $tempBackupDir -Force | Out-Null
 
           $backedUpCount = 0
-          foreach ($relPath in $newFiles) {
-            $existingFile = Join-Path $env:DEPLOY_PATH $relPath
+          foreach ($file in $changedFiles) {
+            $file = $file.Trim()
+            if ($file -eq '') { continue }
+
+            # Strip source prefix (e.g. "app/bank.php" → "bank.php")
+            $relativePath = $file
+            if ($sourcePrefix -ne '' -and $file.StartsWith($sourcePrefix)) {
+              $relativePath = $file.Substring($sourcePrefix.Length)
+            } elseif ($sourcePrefix -ne '') {
+              # File is outside source subfolder — not deployed, skip
+              Write-Host "  Skip (outside source): $file"
+              continue
+            }
+
+            # Skip .github folder and other non-deploy items
+            if ($relativePath.StartsWith('.github/') -or $relativePath -eq '.github') {
+              Write-Host "  Skip (.github): $file"
+              continue
+            }
+
+            # Skip excluded files
+            $fileName = Split-Path $relativePath -Leaf
+            if ($allExcludeFiles -contains $fileName) {
+              Write-Host "  Skip (excluded file): $file"
+              continue
+            }
+
+            # Skip excluded/preserved folders
+            $skip = $false
+            foreach ($xd in $allExcludeFolders) {
+              if ($relativePath -like "$xd/*" -or $relativePath -like "$xd\*") {
+                $skip = $true
+                break
+              }
+            }
+            if ($skip) {
+              Write-Host "  Skip (excluded folder): $file"
+              continue
+            }
+
+            # Check if file exists on server → backup it
+            $existingFile = Join-Path $env:DEPLOY_PATH $relativePath
             if (Test-Path -Path $existingFile) {
-              $destFile = Join-Path $tempBackupDir $relPath
+              $destFile = Join-Path $tempBackupDir $relativePath
               $destDir = Split-Path $destFile -Parent
               if (!(Test-Path -Path $destDir)) {
                 New-Item -ItemType Directory -Path $destDir -Force | Out-Null
               }
               Copy-Item -Path $existingFile -Destination $destFile -Force
               $backedUpCount++
+              Write-Host "  Backup: $relativePath"
+            } else {
+              Write-Host "  New file (no backup needed): $relativePath"
             }
           }
 
           if ($backedUpCount -gt 0) {
             $zipPath = Join-Path $env:BACKUP_PATH "$($env:PROJECT_NAME)_$($env:TIMESTAMP).zip"
-            Write-Host "Backing up $backedUpCount changed files to $zipPath"
+            Write-Host ""
+            Write-Host "Creating backup ZIP with $backedUpCount file(s): $zipPath"
             Compress-Archive -Path "$tempBackupDir\*" -DestinationPath $zipPath -Force
-            Write-Host "Selective backup completed: $zipPath"
+            Write-Host "Selective backup completed"
           } else {
-            Write-Host "No existing files to backup (fresh deployment)"
+            Write-Host "No existing files to backup (all changes are new files)"
           }
 
           # Cleanup temp directory
