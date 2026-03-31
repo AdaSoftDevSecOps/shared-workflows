@@ -1,0 +1,489 @@
+# ============================================================
+# Deploy Template (Reusable Workflow)
+# ============================================================
+# ที่อยู่ไฟล์: .github/workflows/deploy-template.yml
+# วิธีใช้:    ให้ caller workflow เรียกผ่าน workflow_call
+# ============================================================
+name: "[Template] PHP Deploy to Server"
+
+on:
+  workflow_call:
+    inputs:
+      # ──────────────────────────────────────────────────────
+      # Project Config
+      # ──────────────────────────────────────────────────────
+      project-name:
+        description: "ชื่อ project เช่น AdaPos5.0-Journal"
+        required: true
+        type: string
+
+      deploy-path:
+        description: "Path ปลายทางบน server เช่น C:/WebServer/Apache24/htdocs/AdaPos5.0-Journal"
+        required: true
+        type: string
+
+      source-subfolder:
+        description: "Subfolder ใน repo ที่จะ deploy (ถ้าไม่ระบุ = ใช้ root หรือ auto-detect 'app')"
+        required: false
+        type: string
+        default: ""
+
+      # ──────────────────────────────────────────────────────
+      # Backup Config
+      # ──────────────────────────────────────────────────────
+      backup-path:
+        description: "Backup path สำหรับ backup files"
+        required: false
+        type: string
+        default: "C:/X-Backup/Others"
+
+      # ──────────────────────────────────────────────────────
+      # Configurable Preserve Files & Folders
+      # กำหนดไฟล์/โฟลเดอร์ที่ต้อง backup แยก + restore กลับ
+      # ──────────────────────────────────────────────────────
+      preserve-files:
+        description: >
+          รายชื่อไฟล์ที่ต้อง preserve (ไม่ถูก overwrite ตอน deploy)
+          คั่นด้วย comma เช่น "config_deploy.php,.env,database.php"
+        required: false
+        type: string
+        default: "config_deploy.php"
+
+      preserve-folders:
+        description: >
+          รายชื่อโฟลเดอร์ที่ต้อง preserve (ไม่ถูก overwrite ตอน deploy)
+          คั่นด้วย comma เช่น "Logs,uploads,storage"
+        required: false
+        type: string
+        default: "Logs,uploads"
+
+      # ──────────────────────────────────────────────────────
+      # Robocopy Exclude (สิ่งที่ไม่ต้อง copy จาก repo → server)
+      # ──────────────────────────────────────────────────────
+      exclude-files:
+        description: >
+          ไฟล์ที่ไม่ต้อง copy จาก repo ไป server
+          คั่นด้วย comma เช่น "config_deploy.php,.env"
+        required: false
+        type: string
+        default: "config_deploy.php"
+
+      exclude-folders:
+        description: >
+          โฟลเดอร์ที่ไม่ต้อง copy จาก repo ไป server
+          คั่นด้วย comma เช่น "Logs,uploads,.git"
+        required: false
+        type: string
+        default: "Logs,uploads,.git"
+
+      # ──────────────────────────────────────────────────────
+      # Deploy Options
+      # ──────────────────────────────────────────────────────
+      verify-file:
+        description: "ไฟล์ที่ใช้ verify ว่า deploy สำเร็จ เช่น index.php"
+        required: false
+        type: string
+        default: "index.php"
+
+      backup-keep-count:
+        description: "จำนวน backup ที่เก็บไว้ (เก่ากว่านี้จะถูกลบ)"
+        required: false
+        type: number
+        default: 5
+
+      runner-label:
+        description: >
+          Label ของ runner ที่ต้องการ deploy
+          ใช้ระบุว่าจะ deploy ไป VM ไหน เช่น env-dev, env-uat
+        required: true
+        type: string
+
+jobs:
+  deploy:
+    name: "Deploy ${{ inputs.project-name }}"
+    runs-on: [ self-hosted, "${{ inputs.runner-label }}" ]
+
+    env:
+      PROJECT_NAME: ${{ inputs.project-name }}
+      DEPLOY_PATH: ${{ inputs.deploy-path }}
+      BACKUP_PATH: "${{ inputs.backup-path }}"
+      CONFIG_BACKUP_PATH: "${{ inputs.backup-path }}/ConfigFile"
+      PRESERVE_FILES: ${{ inputs.preserve-files }}
+      PRESERVE_FOLDERS: ${{ inputs.preserve-folders }}
+      EXCLUDE_FILES: ${{ inputs.exclude-files }}
+      EXCLUDE_FOLDERS: ${{ inputs.exclude-folders }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      # ────────────────────────────────────────────────────
+      # Step 1: Set TIMESTAMP
+      # ────────────────────────────────────────────────────
+      - name: Set TIMESTAMP
+        shell: powershell
+        run: |
+          $date = Get-Date -Format "yyyy-MM-dd"
+          $timestamp = "${{ github.run_id }}_${date}_${{ github.run_number }}"
+          echo "TIMESTAMP=$timestamp" >> $env:GITHUB_ENV
+          Write-Host "TIMESTAMP set to: $timestamp"
+
+      # ────────────────────────────────────────────────────
+      # Step 2: Create backup directories
+      # ────────────────────────────────────────────────────
+      - name: Create backup directories
+        shell: powershell
+        run: |
+          @($env:BACKUP_PATH, $env:CONFIG_BACKUP_PATH) | ForEach-Object {
+            if (!(Test-Path -Path $_)) {
+              New-Item -ItemType Directory -Path $_ -Force | Out-Null
+              Write-Host "Created: $_"
+            }
+          }
+
+      # ────────────────────────────────────────────────────
+      # Step 3: Selective Backup — ZIP เฉพาะไฟล์ที่จะถูก deploy ทับ
+      # ────────────────────────────────────────────────────
+      - name: Backup only files that will be overwritten
+        shell: powershell
+        run: |
+          if (!(Test-Path -Path $env:DEPLOY_PATH)) {
+            Write-Host "No existing deployment found at $env:DEPLOY_PATH - skipping backup"
+            return
+          }
+
+          # --- Determine source path (same logic as deploy step) ---
+          $sourcePath = $env:GITHUB_WORKSPACE
+          $customSub = "${{ inputs.source-subfolder }}"
+          if ($customSub -ne '') {
+            $sourcePath = Join-Path $env:GITHUB_WORKSPACE $customSub
+          } elseif (Test-Path -Path (Join-Path $env:GITHUB_WORKSPACE "app")) {
+            $sourcePath = Join-Path $env:GITHUB_WORKSPACE "app"
+          }
+
+          # --- Build exclude lists (same as robocopy step) ---
+          $excludeFiles = $env:EXCLUDE_FILES -split ',' | ForEach-Object { $_.Trim() } | Where-Object { $_ -ne '' }
+          $excludeFolders = $env:EXCLUDE_FOLDERS -split ',' | ForEach-Object { $_.Trim() } | Where-Object { $_ -ne '' }
+          # Also exclude preserve items — they won't be overwritten
+          $preserveFiles = $env:PRESERVE_FILES -split ',' | ForEach-Object { $_.Trim() } | Where-Object { $_ -ne '' }
+          $preserveFolders = $env:PRESERVE_FOLDERS -split ',' | ForEach-Object { $_.Trim() } | Where-Object { $_ -ne '' }
+          $allExcludeFiles = $excludeFiles + $preserveFiles | Select-Object -Unique
+          $allExcludeFolders = $excludeFolders + $preserveFolders | Select-Object -Unique
+
+          # --- Collect files from NEW source that will overwrite existing ---
+          $newFiles = Get-ChildItem -Path $sourcePath -Recurse -File | ForEach-Object {
+            $relativePath = $_.FullName.Substring($sourcePath.Length).TrimStart('\','/')
+
+            # Skip excluded files (exact name match)
+            $fileName = $_.Name
+            if ($allExcludeFiles -contains $fileName) { return }
+
+            # Skip excluded/preserved folders
+            $skip = $false
+            foreach ($xd in $allExcludeFolders) {
+              if ($relativePath -like "$xd\*" -or $relativePath -like "$xd/*") {
+                $skip = $true
+                break
+              }
+            }
+            if ($skip) { return }
+
+            $relativePath
+          }
+
+          # --- Collect matching existing files to backup ---
+          $tempBackupDir = Join-Path $env:BACKUP_PATH "_temp_selective_$env:TIMESTAMP"
+          New-Item -ItemType Directory -Path $tempBackupDir -Force | Out-Null
+
+          $backedUpCount = 0
+          foreach ($relPath in $newFiles) {
+            $existingFile = Join-Path $env:DEPLOY_PATH $relPath
+            if (Test-Path -Path $existingFile) {
+              $destFile = Join-Path $tempBackupDir $relPath
+              $destDir = Split-Path $destFile -Parent
+              if (!(Test-Path -Path $destDir)) {
+                New-Item -ItemType Directory -Path $destDir -Force | Out-Null
+              }
+              Copy-Item -Path $existingFile -Destination $destFile -Force
+              $backedUpCount++
+            }
+          }
+
+          if ($backedUpCount -gt 0) {
+            $zipPath = Join-Path $env:BACKUP_PATH "$($env:PROJECT_NAME)_$($env:TIMESTAMP).zip"
+            Write-Host "Backing up $backedUpCount changed files to $zipPath"
+            Compress-Archive -Path "$tempBackupDir\*" -DestinationPath $zipPath -Force
+            Write-Host "Selective backup completed: $zipPath"
+          } else {
+            Write-Host "No existing files to backup (fresh deployment)"
+          }
+
+          # Cleanup temp directory
+          Remove-Item -Path $tempBackupDir -Recurse -Force -ErrorAction SilentlyContinue
+
+      # ────────────────────────────────────────────────────
+      # Step 4: Backup preserve files & folders (ตาม config)
+      # ────────────────────────────────────────────────────
+      - name: Backup preserve files and folders
+        shell: powershell
+        run: |
+          if (!(Test-Path -Path $env:DEPLOY_PATH)) {
+            Write-Host "No existing deployment - skipping preserve backup"
+            return
+          }
+
+          Write-Host "=== Backing up preserve files ==="
+
+          # --- Preserve Files ---
+          $files = $env:PRESERVE_FILES -split ',' | ForEach-Object { $_.Trim() } | Where-Object { $_ -ne '' }
+          foreach ($file in $files) {
+            $src = Join-Path $env:DEPLOY_PATH $file
+            if (Test-Path -Path $src) {
+              Copy-Item -Path $src -Destination "$env:CONFIG_BACKUP_PATH\" -Force
+              Write-Host "  Backed up file: $file"
+            } else {
+              Write-Host "  File not found (skip): $file"
+            }
+          }
+
+          # --- Preserve Folders ---
+          $folders = $env:PRESERVE_FOLDERS -split ',' | ForEach-Object { $_.Trim() } | Where-Object { $_ -ne '' }
+          foreach ($folder in $folders) {
+            $src = Join-Path $env:DEPLOY_PATH $folder
+            if (Test-Path -Path $src) {
+              $zipDest = "$env:CONFIG_BACKUP_PATH\${folder}_$env:TIMESTAMP.zip"
+              Compress-Archive -Path "$src\*" -DestinationPath $zipDest -Force
+              Write-Host "  Backed up folder: $folder → $zipDest"
+            } else {
+              Write-Host "  Folder not found (skip): $folder"
+            }
+          }
+
+          Write-Host "=== Preserve backup completed ==="
+
+      # ────────────────────────────────────────────────────
+      # Step 5: Deploy new files (robocopy)
+      # ────────────────────────────────────────────────────
+      - name: Deploy new files
+        shell: powershell
+        run: |
+          Write-Host "Deploying $env:PROJECT_NAME to $env:DEPLOY_PATH ..."
+
+          if (!(Test-Path -Path $env:DEPLOY_PATH)) {
+            New-Item -ItemType Directory -Path $env:DEPLOY_PATH -Force | Out-Null
+          }
+
+          # Determine source path
+          $sourcePath = $env:GITHUB_WORKSPACE
+          $customSub = "${{ inputs.source-subfolder }}"
+          if ($customSub -ne '') {
+            $sourcePath = Join-Path $env:GITHUB_WORKSPACE $customSub
+            Write-Host "Using custom subfolder: $customSub"
+          } elseif (Test-Path -Path (Join-Path $env:GITHUB_WORKSPACE "app")) {
+            $sourcePath = Join-Path $env:GITHUB_WORKSPACE "app"
+            Write-Host "Auto-detected 'app' directory"
+          }
+          Write-Host "Source: $sourcePath"
+
+          # Build robocopy exclude arguments
+          $xfArgs = @()
+          $xdArgs = @()
+
+          $excludeFiles = $env:EXCLUDE_FILES -split ',' | ForEach-Object { $_.Trim() } | Where-Object { $_ -ne '' }
+          $excludeFolders = $env:EXCLUDE_FOLDERS -split ',' | ForEach-Object { $_.Trim() } | Where-Object { $_ -ne '' }
+
+          if ($excludeFiles.Count -gt 0) { $xfArgs = @("/XF") + $excludeFiles }
+          if ($excludeFolders.Count -gt 0) { $xdArgs = @("/XD") + $excludeFolders }
+
+          $robocopyArgs = @($sourcePath, $env:DEPLOY_PATH, "/E") + $xfArgs + $xdArgs + @("/NFL", "/NDL", "/NJH", "/NJS")
+
+          Write-Host "robocopy $($robocopyArgs -join ' ')"
+          & robocopy @robocopyArgs
+
+          if ($LASTEXITCODE -ge 8) {
+            Write-Host "::error::robocopy failed with exit code $LASTEXITCODE"
+            exit 1
+          }
+
+          Write-Host "Deployment completed successfully"
+          exit 0
+
+      # ────────────────────────────────────────────────────
+      # Step 6: Restore preserve files & folders (ตาม config)
+      # ────────────────────────────────────────────────────
+      - name: Restore preserve files and folders
+        shell: powershell
+        run: |
+          Write-Host "=== Restoring preserve files ==="
+
+          # --- Restore Files ---
+          $files = $env:PRESERVE_FILES -split ',' | ForEach-Object { $_.Trim() } | Where-Object { $_ -ne '' }
+          foreach ($file in $files) {
+            $src = Join-Path $env:CONFIG_BACKUP_PATH $file
+            if (Test-Path -Path $src) {
+              Copy-Item -Path $src -Destination "$env:DEPLOY_PATH\" -Force
+              Write-Host "  Restored file: $file"
+            } else {
+              Write-Host "  Warning: $file not found in backup"
+            }
+          }
+
+          # --- Restore Folders (latest zip only) ---
+          $folders = $env:PRESERVE_FOLDERS -split ',' | ForEach-Object { $_.Trim() } | Where-Object { $_ -ne '' }
+          foreach ($folder in $folders) {
+            $latestZip = Get-ChildItem -Path $env:CONFIG_BACKUP_PATH -Filter "${folder}_*.zip" -ErrorAction SilentlyContinue |
+                         Sort-Object LastWriteTime -Descending |
+                         Select-Object -First 1
+            if ($latestZip) {
+              $destFolder = Join-Path $env:DEPLOY_PATH $folder
+              Write-Host "  Restoring folder: $folder from $($latestZip.Name)"
+              Expand-Archive -Path $latestZip.FullName -DestinationPath $destFolder -Force
+            } else {
+              Write-Host "  No backup found for folder: $folder - skipping"
+            }
+          }
+
+          Write-Host "=== Restore completed ==="
+
+      # ────────────────────────────────────────────────────
+      # Step 7: Clean up old backups
+      # ────────────────────────────────────────────────────
+      - name: Clean up old backups (keep last ${{ inputs.backup-keep-count }})
+        continue-on-error: true
+        shell: powershell
+        run: |
+          $keepCount = ${{ inputs.backup-keep-count }}
+          Write-Host "Cleaning up - keeping last $keepCount backups"
+
+          # Clean selective backups (project-named zips)
+          Get-ChildItem $env:BACKUP_PATH -Filter "$($env:PROJECT_NAME)_*.zip" -ErrorAction SilentlyContinue |
+            Sort-Object LastWriteTime -Descending |
+            Select-Object -Skip $keepCount |
+            Remove-Item -Force
+
+          # Clean config backups
+          Get-ChildItem $env:CONFIG_BACKUP_PATH -Filter '*.zip' -ErrorAction SilentlyContinue |
+            Sort-Object LastWriteTime -Descending |
+            Select-Object -Skip $keepCount |
+            Remove-Item -Force
+
+          Write-Host "Cleanup completed"
+
+      # ────────────────────────────────────────────────────
+      # Step 8: Verify deployment
+      # ────────────────────────────────────────────────────
+      - name: Verify deployment
+        continue-on-error: true
+        shell: powershell
+        run: |
+          Write-Host "=== Verifying deployment ==="
+
+          # Verify main file
+          $verifyFile = "${{ inputs.verify-file }}"
+          $verifyPath = Join-Path $env:DEPLOY_PATH $verifyFile
+          if (Test-Path -Path $verifyPath) {
+            Write-Host "  OK: $verifyFile found"
+          } else {
+            Write-Host "  Warning: $verifyFile not found"
+          }
+
+          # Verify preserve files
+          $files = $env:PRESERVE_FILES -split ',' | ForEach-Object { $_.Trim() } | Where-Object { $_ -ne '' }
+          foreach ($file in $files) {
+            $path = Join-Path $env:DEPLOY_PATH $file
+            if (Test-Path -Path $path) {
+              Write-Host "  OK: $file restored"
+            } else {
+              Write-Host "  Warning: $file not restored"
+            }
+          }
+
+          Write-Host "=== Verification completed ==="
+
+      # ────────────────────────────────────────────────────
+      # Step 9: Rollback on failure (ใช้ robocopy แทน Remove+Expand)
+      # ────────────────────────────────────────────────────
+      - name: Rollback on failure
+        if: failure()
+        shell: powershell
+        run: |
+          Write-Host "::error::Workflow failed! Initiating rollback..."
+
+          # --- Find latest selective backup ---
+          $latestBackup = Get-ChildItem -Path $env:BACKUP_PATH -Filter "$($env:PROJECT_NAME)_*.zip" -ErrorAction SilentlyContinue |
+                          Sort-Object LastWriteTime -Descending |
+                          Select-Object -First 1
+
+          if (!$latestBackup) {
+            Write-Host "::error::No backup found for rollback at $env:BACKUP_PATH"
+            exit 1
+          }
+
+          Write-Host "Restoring from: $($latestBackup.Name)"
+
+          # --- Extract backup to temp dir ---
+          $rollbackTemp = Join-Path $env:BACKUP_PATH "_rollback_temp"
+          if (Test-Path -Path $rollbackTemp) {
+            Remove-Item -Path $rollbackTemp -Recurse -Force -ErrorAction SilentlyContinue
+          }
+          New-Item -ItemType Directory -Path $rollbackTemp -Force | Out-Null
+          Expand-Archive -Path $latestBackup.FullName -DestinationPath $rollbackTemp -Force
+
+          # --- Use robocopy to restore (handles locked files + permissions better) ---
+          # /IS = include same files (overwrite even if identical)
+          # /IT = include tweaked files
+          # /R:3 /W:5 = retry 3 times, wait 5 sec (handles temp locks)
+          # /B = backup mode (ใช้ SeBackupPrivilege bypass permission issues)
+          $robocopyArgs = @(
+            $rollbackTemp,
+            $env:DEPLOY_PATH,
+            "/E", "/IS", "/IT",
+            "/R:3", "/W:5",
+            "/NFL", "/NDL", "/NJH", "/NJS"
+          )
+
+          Write-Host "Rollback robocopy: robocopy $($robocopyArgs -join ' ')"
+          & robocopy @robocopyArgs
+          $roboExit = $LASTEXITCODE
+
+          # If normal mode fails with permission error (exit >= 8), retry with /B (backup mode)
+          if ($roboExit -ge 8) {
+            Write-Host "::warning::Normal robocopy failed (exit $roboExit). Retrying with /B (backup mode)..."
+            $robocopyArgsBackup = $robocopyArgs + @("/B")
+            & robocopy @robocopyArgsBackup
+            $roboExit = $LASTEXITCODE
+          }
+
+          if ($roboExit -ge 8) {
+            Write-Host "::error::Rollback robocopy failed with exit code $roboExit"
+          } else {
+            Write-Host "Rollback file restore completed (robocopy exit: $roboExit)"
+          }
+
+          # --- Restore preserve files/folders back ---
+          Write-Host "=== Restoring preserve items after rollback ==="
+
+          $files = $env:PRESERVE_FILES -split ',' | ForEach-Object { $_.Trim() } | Where-Object { $_ -ne '' }
+          foreach ($file in $files) {
+            $src = Join-Path $env:CONFIG_BACKUP_PATH $file
+            if (Test-Path -Path $src) {
+              Copy-Item -Path $src -Destination "$env:DEPLOY_PATH\" -Force
+              Write-Host "  Restored preserve file: $file"
+            }
+          }
+
+          $folders = $env:PRESERVE_FOLDERS -split ',' | ForEach-Object { $_.Trim() } | Where-Object { $_ -ne '' }
+          foreach ($folder in $folders) {
+            $latestZip = Get-ChildItem -Path $env:CONFIG_BACKUP_PATH -Filter "${folder}_*.zip" -ErrorAction SilentlyContinue |
+                         Sort-Object LastWriteTime -Descending |
+                         Select-Object -First 1
+            if ($latestZip) {
+              $destFolder = Join-Path $env:DEPLOY_PATH $folder
+              Expand-Archive -Path $latestZip.FullName -DestinationPath $destFolder -Force
+              Write-Host "  Restored preserve folder: $folder"
+            }
+          }
+
+          # --- Cleanup temp ---
+          Remove-Item -Path $rollbackTemp -Recurse -Force -ErrorAction SilentlyContinue
+
+          Write-Host "=== Rollback completed from: $($latestBackup.Name) ==="
