@@ -143,16 +143,16 @@ jobs:
       # ────────────────────────────────────────────────────
       # Step 3: Full backup (ZIP)
       # ────────────────────────────────────────────────────
-      - name: Backup current deployment (ZIP whole folder)
-        shell: powershell
-        run: |
-          if (Test-Path -Path $env:DEPLOY_PATH) {
-            $zipPath = "$env:BACKUP_PATH\$env:TIMESTAMP.zip"
-            Write-Host "Backing up to $zipPath"
-            Compress-Archive -Path "$env:DEPLOY_PATH\*" -DestinationPath $zipPath -Force
-          } else {
-            Write-Host "No existing deployment found at $env:DEPLOY_PATH - skipping backup"
-          }
+      # - name: Backup current deployment (ZIP whole folder)
+      #   shell: powershell
+      #   run: |
+      #     if (Test-Path -Path $env:DEPLOY_PATH) {
+      #       $zipPath = "$env:BACKUP_PATH\$env:TIMESTAMP.zip"
+      #       Write-Host "Backing up to $zipPath"
+      #       Compress-Archive -Path "$env:DEPLOY_PATH\*" -DestinationPath $zipPath -Force
+      #     } else {
+      #       Write-Host "No existing deployment found at $env:DEPLOY_PATH - skipping backup"
+      #     }
 
       # ────────────────────────────────────────────────────
       # Step 4: Backup preserve files & folders (ตาม config)
