@@ -1,0 +1,490 @@
+# ============================================================================
+# Shared Workflow: SQL Script Executor with Backup
+# Repository: AdaSoftDevSecOps/shared-workflows
+# Path: .github/workflows/sql-execute.yml
+#
+# ลำดับรัน (ตายตัว — ห้ามรันแทรก):
+#   1. Script-StoreBack-Structure.sql
+#   2. Script-StoreBack-Stored.sql
+#   3. Script-StoreBack-Data.sql
+#
+# Config:
+#   - host/port/backup_path → อ่านจาก config/sql-servers.yml (ใน repo นี้)
+#   - user/password          → Organization Secrets แยกตาม env
+# ============================================================================
+name: SQL Script Executor
+
+on:
+  workflow_call:
+    inputs:
+      db_name:
+        description: 'Target database name'
+        required: true
+        type: string
+      project_name:
+        description: 'Project name for backup folder (e.g. AdaPos, AdaCRM)'
+        required: true
+        type: string
+      backup_enabled:
+        description: 'Backup database before execution'
+        required: false
+        type: boolean
+        default: true
+      script_path:
+        description: 'Directory containing SQL scripts (relative to repo root)'
+        required: false
+        type: string
+        default: '.'
+      stop_on_error:
+        description: 'Stop remaining scripts if any step fails'
+        required: false
+        type: boolean
+        default: true
+      environment:
+        description: 'Target environment (DEV/SIT/UAT/PROD)'
+        required: true
+        type: string
+
+    secrets:
+      # แยก user/password ตาม environment
+      # Caller ส่งมาตาม env ที่เลือก
+      SQL_USER:
+        required: true
+      SQL_PASSWORD:
+        required: true
+
+jobs:
+  execute-sql:
+    name: "[${{ inputs.environment }}] ${{ inputs.project_name }} → ${{ inputs.db_name }}"
+    runs-on: [self-hosted, windows, "${{ inputs.environment }}"]
+
+    concurrency:
+      group: sql-deploy-${{ inputs.environment }}-${{ inputs.db_name }}
+      cancel-in-progress: false
+
+    steps:
+      # =====================================================
+      # 1. Checkout caller repository (มี SQL scripts)
+      # =====================================================
+      - name: Checkout caller repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+          path: caller
+
+      # =====================================================
+      # 2. Checkout shared-workflows (มี config)
+      # =====================================================
+      - name: Checkout shared-workflows config
+        uses: actions/checkout@v4
+        with:
+          repository: AdaSoftDevSecOps/shared-workflows
+          path: shared-config
+          sparse-checkout: config
+          fetch-depth: 1
+
+      # =====================================================
+      # 3. Read config → set env vars for this environment
+      # =====================================================
+      - name: Load SQL Server config for ${{ inputs.environment }}
+        id: config
+        shell: pwsh
+        run: |
+          $configPath = "shared-config/config/sql-servers.yml"
+
+          if (-not (Test-Path $configPath)) {
+            Write-Host "::error::Config file not found: $configPath"
+            exit 1
+          }
+
+          # ============================================================
+          # Parse YAML ด้วย PowerShell (ไม่ต้องพึ่ง module ภายนอก)
+          # อ่านเฉพาะค่า host, port, backup path ตาม environment
+          # ============================================================
+          $env_name = "${{ inputs.environment }}"
+          $content  = Get-Content $configPath -Raw
+
+          # Simple YAML parser สำหรับ flat key-value
+          function Get-YamlValue {
+            param([string]$Content, [string]$Section, [string]$Key)
+
+            $lines    = $Content -split "`n"
+            $inSection = $false
+            $sectionDepth = -1
+
+            foreach ($line in $lines) {
+              # ตรวจ section header เช่น "  DEV:"
+              if ($line -match "^\s*${Section}\s*:\s*$") {
+                $inSection = $true
+                $sectionDepth = ($line -replace '[^\s].*', '').Length
+                continue
+              }
+
+              if ($inSection) {
+                $currentDepth = ($line -replace '[^\s].*', '').Length
+                # ออกจาก section ถ้า indent เท่ากันหรือน้อยกว่า
+                if ($line.Trim() -ne '' -and $currentDepth -le $sectionDepth -and $line -notmatch '^\s*#') {
+                  $inSection = $false
+                  continue
+                }
+
+                if ($line -match "^\s*${Key}\s*:\s*`"?([^`"]+)`"?\s*$") {
+                  return $Matches[1].Trim()
+                }
+              }
+            }
+            return $null
+          }
+
+          # อ่าน host/port จาก environments section
+          $sqlHost = Get-YamlValue -Content $content -Section $env_name -Key "host"
+          $sqlPort = Get-YamlValue -Content $content -Section $env_name -Key "port"
+
+          # อ่าน backup path จาก backup section
+          $lines = $content -split "`n"
+          $inBackup = $false
+          $backupPath = $null
+          foreach ($line in $lines) {
+            if ($line -match "^backup\s*:\s*$") { $inBackup = $true; continue }
+            if ($inBackup) {
+              if ($line -match "^\s*${env_name}\s*:\s*`"?([^`"]+)`"?\s*$") {
+                $backupPath = $Matches[1].Trim()
+                break
+              }
+              if ($line.Trim() -ne '' -and $line -notmatch '^\s' -and $line -notmatch '^\s*#') {
+                break
+              }
+            }
+          }
+
+          # Validate
+          if (-not $sqlHost) {
+            Write-Host "::error::No host configured for environment '$env_name' in sql-servers.yml"
+            exit 1
+          }
+          if (-not $sqlPort) { $sqlPort = "1433" }
+          if (-not $backupPath) { $backupPath = "D:\SQLBackups" }
+
+          Write-Host "Environment:  $env_name"
+          Write-Host "SQL Host:     $sqlHost"
+          Write-Host "SQL Port:     $sqlPort"
+          Write-Host "Backup Path:  $backupPath"
+
+          # Output สำหรับ steps ถัดไป
+          echo "sql_host=$sqlHost"       >> $env:GITHUB_OUTPUT
+          echo "sql_port=$sqlPort"       >> $env:GITHUB_OUTPUT
+          echo "backup_base=$backupPath" >> $env:GITHUB_OUTPUT
+
+      # =====================================================
+      # 4. Validate script files
+      # =====================================================
+      - name: Validate script files
+        id: validate
+        shell: pwsh
+        run: |
+          $scriptDir = "caller/${{ inputs.script_path }}"
+
+          $scripts = [ordered]@{
+            "1_Structure" = "Script-StoreBack-Structure.sql"
+            "2_Stored"    = "Script-StoreBack-Stored.sql"
+            "3_Data"      = "Script-StoreBack-Data.sql"
+          }
+
+          Write-Host "::group::Validating scripts in '$scriptDir'"
+
+          $foundList   = @()
+          $missingList = @()
+
+          foreach ($entry in $scripts.GetEnumerator()) {
+            $fullPath = Join-Path $scriptDir $entry.Value
+            if (Test-Path $fullPath) {
+              $size = (Get-Item $fullPath).Length
+              Write-Host "  [FOUND]   $($entry.Value) ($size bytes)"
+              $foundList += $fullPath
+            } else {
+              Write-Host "  [MISSING] $($entry.Value) — will be skipped"
+              $missingList += $entry.Value
+            }
+          }
+
+          if ($foundList.Count -eq 0) {
+            Write-Host "::warning::No StoreBack scripts found"
+            echo "has_scripts=false" >> $env:GITHUB_OUTPUT
+            Write-Host "::endgroup::"
+            exit 0
+          }
+
+          echo "has_scripts=true" >> $env:GITHUB_OUTPUT
+          echo "script_count=$($foundList.Count)" >> $env:GITHUB_OUTPUT
+
+          $json = $foundList | ConvertTo-Json -Compress
+          if ($foundList.Count -eq 1) { $json = "[$json]" }
+          echo "script_list=$json" >> $env:GITHUB_OUTPUT
+
+          Write-Host "Will execute $($foundList.Count) of $($scripts.Count) scripts"
+          Write-Host "::endgroup::"
+
+      # =====================================================
+      # 5. Verify SQL Server connectivity
+      # =====================================================
+      - name: Verify SQL Server connection
+        if: steps.validate.outputs.has_scripts == 'true'
+        shell: pwsh
+        env:
+          SQL_HOST: ${{ steps.config.outputs.sql_host }}
+          SQL_PORT: ${{ steps.config.outputs.sql_port }}
+          SQL_USER: ${{ secrets.SQL_USER }}
+          SQL_PASS: ${{ secrets.SQL_PASSWORD }}
+        run: |
+          $server = "$env:SQL_HOST,$env:SQL_PORT"
+
+          Write-Host "::group::Connecting to [${{ inputs.db_name }}] on $env:SQL_HOST"
+
+          $result = sqlcmd -S $server `
+                          -U $env:SQL_USER `
+                          -P $env:SQL_PASS `
+                          -d "${{ inputs.db_name }}" `
+                          -Q "SELECT @@SERVERNAME AS [Server], DB_NAME() AS [Database]" `
+                          -W -h -1 2>&1
+
+          if ($LASTEXITCODE -ne 0) {
+            Write-Host "::error::Connection failed: $result"
+            exit 1
+          }
+
+          Write-Host "Connected: $result"
+          Write-Host "::endgroup::"
+
+      # =====================================================
+      # 6. Backup Database
+      # =====================================================
+      - name: Backup database
+        if: inputs.backup_enabled && steps.validate.outputs.has_scripts == 'true'
+        id: backup
+        shell: pwsh
+        env:
+          SQL_HOST: ${{ steps.config.outputs.sql_host }}
+          SQL_PORT: ${{ steps.config.outputs.sql_port }}
+          SQL_USER: ${{ secrets.SQL_USER }}
+          SQL_PASS: ${{ secrets.SQL_PASSWORD }}
+        run: |
+          $server      = "$env:SQL_HOST,$env:SQL_PORT"
+          $timestamp   = Get-Date -Format "yyyyMMdd_HHmmss"
+          $backupBase  = "${{ steps.config.outputs.backup_base }}"
+          $projectName = "${{ inputs.project_name }}"
+          $dbName      = "${{ inputs.db_name }}"
+          $envName     = "${{ inputs.environment }}"
+
+          # โครงสร้าง: {Base}\{ProjectName}\{ENV}\{db}_{timestamp}_pre-deploy.bak
+          $backupDir  = Join-Path $backupBase $projectName $envName
+          $backupFile = "${dbName}_${timestamp}_pre-deploy.bak"
+          $backupPath = Join-Path $backupDir $backupFile
+
+          Write-Host "::group::Backing up [$dbName] → $backupPath"
+
+          # สร้าง directory
+          sqlcmd -S $server -U $env:SQL_USER -P $env:SQL_PASS `
+                 -Q "EXEC master.dbo.xp_create_subdir N'$backupDir';" 2>&1 | Write-Host
+
+          $backupSql = @"
+          BACKUP DATABASE [$dbName]
+          TO DISK = N'$backupPath'
+          WITH COMPRESSION, CHECKSUM, INIT, STATS = 10,
+               NAME = N'$dbName - Pre-Deploy $timestamp';
+          "@
+
+          $result = sqlcmd -S $server -U $env:SQL_USER -P $env:SQL_PASS `
+                          -Q $backupSql 2>&1
+
+          if ($LASTEXITCODE -ne 0) {
+            Write-Host "::error::Backup FAILED — aborting deployment"
+            Write-Host $result
+            exit 1
+          }
+
+          Write-Host $result
+          Write-Host "Backup completed"
+          echo "backup_path=$backupPath" >> $env:GITHUB_OUTPUT
+          Write-Host "::endgroup::"
+
+      # =====================================================
+      # 7. Execute: Structure → Stored → Data
+      # =====================================================
+      - name: "Execute: Structure → Stored → Data"
+        if: steps.validate.outputs.has_scripts == 'true'
+        id: execute
+        shell: pwsh
+        env:
+          SQL_HOST: ${{ steps.config.outputs.sql_host }}
+          SQL_PORT: ${{ steps.config.outputs.sql_port }}
+          SQL_USER: ${{ secrets.SQL_USER }}
+          SQL_PASS: ${{ secrets.SQL_PASSWORD }}
+        run: |
+          $server      = "$env:SQL_HOST,$env:SQL_PORT"
+          $scriptList  = '${{ steps.validate.outputs.script_list }}' | ConvertFrom-Json
+          $stopOnError = [System.Boolean]::Parse("${{ inputs.stop_on_error }}")
+          $total       = $scriptList.Count
+          $success     = 0
+          $failed      = 0
+          $failedFiles = @()
+
+          $stepLabels = @{
+            "Script-StoreBack-Structure.sql" = "STEP 1/3 — Structure (DDL)"
+            "Script-StoreBack-Stored.sql"    = "STEP 2/3 — Stored Procedures"
+            "Script-StoreBack-Data.sql"      = "STEP 3/3 — Data (DML)"
+          }
+
+          Write-Host "::group::Executing $total script(s) on [${{ inputs.db_name }}] @ $env:SQL_HOST"
+          Write-Host "Order: Structure -> Stored -> Data"
+          Write-Host ""
+
+          foreach ($scriptPath in $scriptList) {
+            $scriptName = Split-Path $scriptPath -Leaf
+            $label = $stepLabels[$scriptName]
+            if (-not $label) { $label = $scriptName }
+
+            Write-Host "============================================"
+            Write-Host "$label"
+            Write-Host "File: $scriptName"
+            Write-Host "============================================"
+
+            $startTime = Get-Date
+
+            $result = sqlcmd -S $server `
+                            -U $env:SQL_USER `
+                            -P $env:SQL_PASS `
+                            -d "${{ inputs.db_name }}" `
+                            -i "$scriptPath" `
+                            -b -r1 2>&1
+
+            $duration = [math]::Round(((Get-Date) - $startTime).TotalSeconds, 1)
+
+            if ($LASTEXITCODE -ne 0) {
+              $failed++
+              $failedFiles += $scriptName
+              Write-Host "::error::FAILED: $scriptName (${duration}s)"
+              Write-Host $result
+
+              if ($stopOnError) {
+                Write-Host ""
+                Write-Host "::error::stop_on_error=true — HALTING"
+                Write-Host ""
+                Write-Host "====== EXECUTION HALTED ======"
+                Write-Host "Completed: $success | Failed: $failed | Skipped: $($total - $success - $failed)"
+                Write-Host "Failed at: $scriptName"
+                Write-Host "Backup:    ${{ steps.backup.outputs.backup_path }}"
+                Write-Host "==============================="
+
+                echo "status=FAILED"  >> $env:GITHUB_OUTPUT
+                echo "failed_at=$scriptName" >> $env:GITHUB_OUTPUT
+                echo "failed_files=$($failedFiles -join ',')" >> $env:GITHUB_OUTPUT
+                echo "success_count=$success" >> $env:GITHUB_OUTPUT
+                exit 1
+              }
+            } else {
+              $success++
+              Write-Host $result
+              Write-Host "SUCCESS: $scriptName (${duration}s)"
+            }
+
+            Write-Host ""
+          }
+
+          Write-Host "====== ALL SCRIPTS COMPLETED ======"
+          Write-Host "Total: $total | Success: $success | Failed: $failed"
+          Write-Host "===================================="
+          Write-Host "::endgroup::"
+
+          if ($failed -gt 0) {
+            echo "status=PARTIAL_FAILURE" >> $env:GITHUB_OUTPUT
+            echo "failed_files=$($failedFiles -join ',')" >> $env:GITHUB_OUTPUT
+            echo "success_count=$success" >> $env:GITHUB_OUTPUT
+            exit 1
+          }
+
+          echo "status=SUCCESS" >> $env:GITHUB_OUTPUT
+          echo "success_count=$success" >> $env:GITHUB_OUTPUT
+
+      # =====================================================
+      # 8. Execution Report
+      # =====================================================
+      - name: Generate report
+        if: always() && steps.validate.outputs.has_scripts == 'true'
+        shell: pwsh
+        run: |
+          $status      = "${{ steps.execute.outputs.status }}"
+          $backupPath  = "${{ steps.backup.outputs.backup_path }}"
+          $failedAt    = "${{ steps.execute.outputs.failed_at }}"
+          $failedFiles = "${{ steps.execute.outputs.failed_files }}"
+          $scriptCount = "${{ steps.validate.outputs.script_count }}"
+          $sqlHost     = "${{ steps.config.outputs.sql_host }}"
+
+          $emoji = switch ($status) {
+            "SUCCESS"         { "✅" }
+            "PARTIAL_FAILURE" { "⚠️" }
+            "FAILED"          { "❌" }
+            default           { "ℹ️" }
+          }
+
+          $summary = @"
+          ## $emoji SQL Deployment Report
+
+          | Item | Detail |
+          |------|--------|
+          | **Environment** | ``${{ inputs.environment }}`` |
+          | **Project** | ${{ inputs.project_name }} |
+          | **Database** | ``${{ inputs.db_name }}`` |
+          | **Server** | ``$sqlHost`` |
+          | **Scripts** | $scriptCount |
+          | **Status** | **$status** |
+          | **Backup** | ``$backupPath`` |
+          | **Triggered By** | @${{ github.actor }} |
+          | **Commit** | ``${{ github.sha }}`` |
+
+          ### Execution Order
+
+          "@
+
+          $allScripts = @(
+            @{ Step = "1"; Name = "Script-StoreBack-Structure.sql"; Label = "Structure (DDL)" },
+            @{ Step = "2"; Name = "Script-StoreBack-Stored.sql";    Label = "Stored Procedures" },
+            @{ Step = "3"; Name = "Script-StoreBack-Data.sql";      Label = "Data (DML)" }
+          )
+
+          $failedList = if ($failedFiles) { $failedFiles -split ',' } else { @() }
+          $hitFailed  = $false
+
+          $summary += "| Step | Script | Type | Status |`n"
+          $summary += "|------|--------|------|--------|`n"
+
+          foreach ($s in $allScripts) {
+            if ($hitFailed) {
+              $sStatus = "⏭️ Skipped"
+            } elseif ($failedList -contains $s.Name) {
+              $sStatus = "❌ Failed"
+              $hitFailed = $true
+            } else {
+              $sStatus = "✅ Success"
+            }
+            $summary += "| $($s.Step) | ``$($s.Name)`` | $($s.Label) | $sStatus |`n"
+          }
+
+          if ($failedFiles) {
+            $summary += @"
+
+          ---
+          ### 🔄 Rollback Options
+
+          **Option A — Fix & Re-push:**
+          แก้ไข script ที่พัง push/merge ใหม่ — workflow จะรัน Structure → Stored → Data ใหม่ทั้งหมด
+
+          **Option B — Restore from backup:**
+          ``````sql
+          ALTER DATABASE [${{ inputs.db_name }}] SET SINGLE_USER WITH ROLLBACK IMMEDIATE;
+          RESTORE DATABASE [${{ inputs.db_name }}] FROM DISK = N'$backupPath' WITH REPLACE;
+          ALTER DATABASE [${{ inputs.db_name }}] SET MULTI_USER;
+          ``````
+          "@
+          }
+
+          $summary | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Encoding utf8
