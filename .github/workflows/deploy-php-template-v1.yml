@@ -115,6 +115,8 @@ jobs:
 
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 2
 
       # ────────────────────────────────────────────────────
       # Step 1: Set TIMESTAMP
@@ -141,18 +143,124 @@ jobs:
           }
 
       # ────────────────────────────────────────────────────
-      # Step 3: Full backup (ZIP)
+      # Step 3: Selective Backup — ZIP เฉพาะไฟล์ที่ถูกแก้ไขจริง (git diff)
       # ────────────────────────────────────────────────────
-      # - name: Backup current deployment (ZIP whole folder)
-      #   shell: powershell
-      #   run: |
-      #     if (Test-Path -Path $env:DEPLOY_PATH) {
-      #       $zipPath = "$env:BACKUP_PATH\$env:TIMESTAMP.zip"
-      #       Write-Host "Backing up to $zipPath"
-      #       Compress-Archive -Path "$env:DEPLOY_PATH\*" -DestinationPath $zipPath -Force
-      #     } else {
-      #       Write-Host "No existing deployment found at $env:DEPLOY_PATH - skipping backup"
-      #     }
+      - name: Backup only actually changed files
+        shell: powershell
+        run: |
+          if (!(Test-Path -Path $env:DEPLOY_PATH)) {
+            Write-Host "No existing deployment found - skipping backup"
+            return
+          }
+
+          # --- Get changed files: ใช้ HEAD~1 เทียบกับ HEAD ---
+          # fetch-depth: 2 ทำให้มี parent commit อยู่แล้ว ไม่ต้อง fetch เพิ่ม
+          try {
+            $changedFiles = git diff --name-only HEAD~1 HEAD 2>&1
+            if ($LASTEXITCODE -ne 0) { throw "git diff failed" }
+          } catch {
+            Write-Host "::warning::git diff failed, falling back to all tracked files"
+            $changedFiles = git ls-files
+          }
+
+          if (!$changedFiles) {
+            Write-Host "No changed files detected - skipping backup"
+            return
+          }
+
+          Write-Host "=== Changed files from git diff ==="
+          $changedFiles | ForEach-Object { Write-Host "  $_" }
+
+          # --- Determine source subfolder prefix to strip ---
+          $sourcePrefix = ""
+          $customSub = "${{ inputs.source-subfolder }}"
+          if ($customSub -ne '') {
+            $sourcePrefix = "$customSub/"
+          } elseif (Test-Path -Path (Join-Path $env:GITHUB_WORKSPACE "app")) {
+            $sourcePrefix = "app/"
+          }
+
+          # --- Build exclude lists ---
+          $excludeFiles   = $env:EXCLUDE_FILES -split ',' | ForEach-Object { $_.Trim() } | Where-Object { $_ -ne '' }
+          $excludeFolders  = $env:EXCLUDE_FOLDERS -split ',' | ForEach-Object { $_.Trim() } | Where-Object { $_ -ne '' }
+          $preserveFiles   = $env:PRESERVE_FILES -split ',' | ForEach-Object { $_.Trim() } | Where-Object { $_ -ne '' }
+          $preserveFolders = $env:PRESERVE_FOLDERS -split ',' | ForEach-Object { $_.Trim() } | Where-Object { $_ -ne '' }
+          $allExcludeFiles   = ($excludeFiles + $preserveFiles) | Select-Object -Unique
+          $allExcludeFolders = ($excludeFolders + $preserveFolders) | Select-Object -Unique
+
+          # --- Filter changed files → only those that map to deploy path ---
+          $tempBackupDir = Join-Path $env:BACKUP_PATH "_temp_selective_$env:TIMESTAMP"
+          New-Item -ItemType Directory -Path $tempBackupDir -Force | Out-Null
+
+          $backedUpCount = 0
+          foreach ($file in $changedFiles) {
+            $file = $file.Trim()
+            if ($file -eq '') { continue }
+
+            # Strip source prefix (e.g. "app/bank.php" → "bank.php")
+            $relativePath = $file
+            if ($sourcePrefix -ne '' -and $file.StartsWith($sourcePrefix)) {
+              $relativePath = $file.Substring($sourcePrefix.Length)
+            } elseif ($sourcePrefix -ne '') {
+              # File is outside source subfolder — not deployed, skip
+              Write-Host "  Skip (outside source): $file"
+              continue
+            }
+
+            # Skip .github folder and other non-deploy items
+            if ($relativePath.StartsWith('.github/') -or $relativePath -eq '.github') {
+              Write-Host "  Skip (.github): $file"
+              continue
+            }
+
+            # Skip excluded files
+            $fileName = Split-Path $relativePath -Leaf
+            if ($allExcludeFiles -contains $fileName) {
+              Write-Host "  Skip (excluded file): $file"
+              continue
+            }
+
+            # Skip excluded/preserved folders
+            $skip = $false
+            foreach ($xd in $allExcludeFolders) {
+              if ($relativePath -like "$xd/*" -or $relativePath -like "$xd\*") {
+                $skip = $true
+                break
+              }
+            }
+            if ($skip) {
+              Write-Host "  Skip (excluded folder): $file"
+              continue
+            }
+
+            # Check if file exists on server → backup it
+            $existingFile = Join-Path $env:DEPLOY_PATH $relativePath
+            if (Test-Path -Path $existingFile) {
+              $destFile = Join-Path $tempBackupDir $relativePath
+              $destDir = Split-Path $destFile -Parent
+              if (!(Test-Path -Path $destDir)) {
+                New-Item -ItemType Directory -Path $destDir -Force | Out-Null
+              }
+              Copy-Item -Path $existingFile -Destination $destFile -Force
+              $backedUpCount++
+              Write-Host "  Backup: $relativePath"
+            } else {
+              Write-Host "  New file (no backup needed): $relativePath"
+            }
+          }
+
+          if ($backedUpCount -gt 0) {
+            $zipPath = Join-Path $env:BACKUP_PATH "$($env:PROJECT_NAME)_$($env:TIMESTAMP).zip"
+            Write-Host ""
+            Write-Host "Creating backup ZIP with $backedUpCount file(s): $zipPath"
+            Compress-Archive -Path "$tempBackupDir\*" -DestinationPath $zipPath -Force
+            Write-Host "Selective backup completed"
+          } else {
+            Write-Host "No existing files to backup (all changes are new files)"
+          }
+
+          # Cleanup temp directory
+          Remove-Item -Path $tempBackupDir -Recurse -Force -ErrorAction SilentlyContinue
 
       # ────────────────────────────────────────────────────
       # Step 4: Backup preserve files & folders (ตาม config)
@@ -238,8 +346,12 @@ jobs:
             exit 1
           }
 
-          Write-Host "Deployment completed successfully"
-          exit 0
+          # === TEMP: Force fail to test rollback ===
+          Write-Host "::error::Simulated deploy failure for rollback test"
+          exit 1
+
+          # Write-Host "Deployment completed successfully"
+          # exit 0
 
       # ────────────────────────────────────────────────────
       # Step 6: Restore preserve files & folders (ตาม config)
@@ -288,8 +400,8 @@ jobs:
           $keepCount = ${{ inputs.backup-keep-count }}
           Write-Host "Cleaning up - keeping last $keepCount backups"
 
-          # Clean full backups
-          Get-ChildItem $env:BACKUP_PATH -Filter '*.zip' -ErrorAction SilentlyContinue |
+          # Clean selective backups (project-named zips)
+          Get-ChildItem $env:BACKUP_PATH -Filter "$($env:PROJECT_NAME)_*.zip" -ErrorAction SilentlyContinue |
             Sort-Object LastWriteTime -Descending |
             Select-Object -Skip $keepCount |
             Remove-Item -Force
@@ -334,7 +446,7 @@ jobs:
           Write-Host "=== Verification completed ==="
 
       # ────────────────────────────────────────────────────
-      # Step 9: Rollback on failure
+      # Step 9: Rollback on failure (ใช้ robocopy แทน Remove+Expand)
       # ────────────────────────────────────────────────────
       - name: Rollback on failure
         if: failure()
@@ -342,28 +454,82 @@ jobs:
         run: |
           Write-Host "::error::Workflow failed! Initiating rollback..."
 
-          $latestBackup = Get-ChildItem -Path $env:BACKUP_PATH -Filter '*.zip' -ErrorAction SilentlyContinue |
+          # --- Find latest selective backup ---
+          $latestBackup = Get-ChildItem -Path $env:BACKUP_PATH -Filter "$($env:PROJECT_NAME)_*.zip" -ErrorAction SilentlyContinue |
                           Sort-Object LastWriteTime -Descending |
                           Select-Object -First 1
 
-          if ($latestBackup) {
-            Write-Host "Restoring from: $($latestBackup.Name)"
-
-            # Build list of items to preserve during rollback
-            $preserveItems = @()
-            $files = $env:PRESERVE_FILES -split ',' | ForEach-Object { $_.Trim() } | Where-Object { $_ -ne '' }
-            $folders = $env:PRESERVE_FOLDERS -split ',' | ForEach-Object { $_.Trim() } | Where-Object { $_ -ne '' }
-            $preserveItems += $files
-            $preserveItems += $folders
-
-            if (Test-Path -Path $env:DEPLOY_PATH) {
-              Get-ChildItem -Path $env:DEPLOY_PATH |
-                Where-Object { $preserveItems -notcontains $_.Name } |
-                Remove-Item -Recurse -Force
-            }
-
-            Expand-Archive -Path $latestBackup.FullName -DestinationPath $env:DEPLOY_PATH -Force
-            Write-Host "Rollback completed from: $($latestBackup.Name)"
-          } else {
+          if (!$latestBackup) {
             Write-Host "::error::No backup found for rollback at $env:BACKUP_PATH"
+            exit 1
           }
+
+          Write-Host "Restoring from: $($latestBackup.Name)"
+
+          # --- Extract backup to temp dir ---
+          $rollbackTemp = Join-Path $env:BACKUP_PATH "_rollback_temp"
+          if (Test-Path -Path $rollbackTemp) {
+            Remove-Item -Path $rollbackTemp -Recurse -Force -ErrorAction SilentlyContinue
+          }
+          New-Item -ItemType Directory -Path $rollbackTemp -Force | Out-Null
+          Expand-Archive -Path $latestBackup.FullName -DestinationPath $rollbackTemp -Force
+
+          # --- Use robocopy to restore (handles locked files + permissions better) ---
+          # /IS = include same files (overwrite even if identical)
+          # /IT = include tweaked files
+          # /R:3 /W:5 = retry 3 times, wait 5 sec (handles temp locks)
+          # /B = backup mode (ใช้ SeBackupPrivilege bypass permission issues)
+          $robocopyArgs = @(
+            $rollbackTemp,
+            $env:DEPLOY_PATH,
+            "/E", "/IS", "/IT",
+            "/R:3", "/W:5",
+            "/NFL", "/NDL", "/NJH", "/NJS"
+          )
+
+          Write-Host "Rollback robocopy: robocopy $($robocopyArgs -join ' ')"
+          & robocopy @robocopyArgs
+          $roboExit = $LASTEXITCODE
+
+          # If normal mode fails with permission error (exit >= 8), retry with /B (backup mode)
+          if ($roboExit -ge 8) {
+            Write-Host "::warning::Normal robocopy failed (exit $roboExit). Retrying with /B (backup mode)..."
+            $robocopyArgsBackup = $robocopyArgs + @("/B")
+            & robocopy @robocopyArgsBackup
+            $roboExit = $LASTEXITCODE
+          }
+
+          if ($roboExit -ge 8) {
+            Write-Host "::error::Rollback robocopy failed with exit code $roboExit"
+          } else {
+            Write-Host "Rollback file restore completed (robocopy exit: $roboExit)"
+          }
+
+          # --- Restore preserve files/folders back ---
+          Write-Host "=== Restoring preserve items after rollback ==="
+
+          $files = $env:PRESERVE_FILES -split ',' | ForEach-Object { $_.Trim() } | Where-Object { $_ -ne '' }
+          foreach ($file in $files) {
+            $src = Join-Path $env:CONFIG_BACKUP_PATH $file
+            if (Test-Path -Path $src) {
+              Copy-Item -Path $src -Destination "$env:DEPLOY_PATH\" -Force
+              Write-Host "  Restored preserve file: $file"
+            }
+          }
+
+          $folders = $env:PRESERVE_FOLDERS -split ',' | ForEach-Object { $_.Trim() } | Where-Object { $_ -ne '' }
+          foreach ($folder in $folders) {
+            $latestZip = Get-ChildItem -Path $env:CONFIG_BACKUP_PATH -Filter "${folder}_*.zip" -ErrorAction SilentlyContinue |
+                         Sort-Object LastWriteTime -Descending |
+                         Select-Object -First 1
+            if ($latestZip) {
+              $destFolder = Join-Path $env:DEPLOY_PATH $folder
+              Expand-Archive -Path $latestZip.FullName -DestinationPath $destFolder -Force
+              Write-Host "  Restored preserve folder: $folder"
+            }
+          }
+
+          # --- Cleanup temp ---
+          Remove-Item -Path $rollbackTemp -Recurse -Force -ErrorAction SilentlyContinue
+
+          Write-Host "=== Rollback completed from: $($latestBackup.Name) ==="
