@@ -149,28 +149,18 @@ jobs:
         shell: powershell
         run: |
           if (!(Test-Path -Path $env:DEPLOY_PATH)) {
-            Write-Host "No existing deployment found at $env:DEPLOY_PATH - skipping backup"
+            Write-Host "No existing deployment found - skipping backup"
             return
           }
 
-          # --- Get list of changed files from git ---
-          # fetch enough history to compare
-          git fetch origin ${{ github.event.before }} --depth=1 2>$null
-
-          $beforeSha = "${{ github.event.before }}"
-          $afterSha  = "${{ github.sha }}"
-
-          if ($beforeSha -and $beforeSha -ne '0000000000000000000000000000000000000000') {
-            # Normal push — diff between before and after
-            $changedFiles = git diff --name-only $beforeSha $afterSha 2>$null
-          } else {
-            # First push or force push — diff against parent
-            $changedFiles = git diff --name-only HEAD~1 HEAD 2>$null
-            if ($LASTEXITCODE -ne 0) {
-              # Single commit repo — list all files
-              $changedFiles = git ls-files 2>$null
-              Write-Host "::warning::Cannot determine diff, falling back to all files"
-            }
+          # --- Get changed files: ใช้ HEAD~1 เทียบกับ HEAD ---
+          # fetch-depth: 2 ทำให้มี parent commit อยู่แล้ว ไม่ต้อง fetch เพิ่ม
+          try {
+            $changedFiles = git diff --name-only HEAD~1 HEAD 2>&1
+            if ($LASTEXITCODE -ne 0) { throw "git diff failed" }
+          } catch {
+            Write-Host "::warning::git diff failed, falling back to all tracked files"
+            $changedFiles = git ls-files
           }
 
           if (!$changedFiles) {
