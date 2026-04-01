@@ -1,0 +1,44 @@
+# ============================================================================
+# SQL Server Configuration — ส่วนกลาง
+# Repository: AdaSoftDevSecOps/shared-workflows
+# Path: config/sql-servers.yml
+#
+# ไฟล์นี้เก็บ host/port ของแต่ละ environment
+# ⚠️  ห้ามเก็บ user/password ในไฟล์นี้ — ใช้ Organization Secrets แทน
+#
+# Organization Secrets ที่ต้องตั้ง (ตาม environment):
+#   SQL_USER_DEV      / SQL_PASSWORD_DEV
+#   SQL_USER_SIT      / SQL_PASSWORD_SIT
+#   SQL_USER_UAT      / SQL_PASSWORD_UAT
+#   SQL_USER_PROD     / SQL_PASSWORD_PROD
+#   SQL_BACKUP_BASE_PATH   (ใช้ร่วมกันทุก env หรือแยกก็ได้)
+# ============================================================================
+
+environments:
+
+  DEV:
+    host: "27.254.239.245"
+    port: "33433"
+    description: "Development Server"
+
+  SIT:
+    host: "0"
+    port: "0"
+    description: "System Integration Test Server"
+
+  UAT:
+    host: "0"
+    port: "0"
+    description: "User Acceptance Test Server"
+
+  PROD:
+    host: "0"
+    port: "0"
+    description: "Production Server"
+
+# Backup base path (ปรับตาม environment ถ้าต้องการ)
+backup:
+  DEV:  "C:\\X-BACKUP"
+  SIT:  ""
+  UAT:  ""
+  PROD: ""
