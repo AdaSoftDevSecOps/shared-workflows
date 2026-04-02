@@ -79,7 +79,7 @@ jobs:
       # =====================================================
       - name: Validate script files
         id: validate
-        shell: pwsh
+        shell: powershell
         run: |
           $scriptDir = "${{ inputs.script_path }}"
 
@@ -127,7 +127,7 @@ jobs:
       # =====================================================
       - name: Verify SQL Server connection
         if: steps.validate.outputs.has_scripts == 'true'
-        shell: pwsh
+        shell: powershell
         run: |
           $server = "${{ secrets.SQL_HOST }},${{ secrets.SQL_PORT }}"
 
@@ -154,7 +154,7 @@ jobs:
       - name: Backup database
         if: inputs.backup_enabled && steps.validate.outputs.has_scripts == 'true'
         id: backup
-        shell: pwsh
+        shell: powershell
         run: |
           $server      = "${{ secrets.SQL_HOST }},${{ secrets.SQL_PORT }}"
           $dbName      = "${{ inputs.db_name }}"
@@ -200,7 +200,7 @@ jobs:
       - name: "Execute: Structure → Stored → Data"
         if: steps.validate.outputs.has_scripts == 'true'
         id: execute
-        shell: pwsh
+        shell: powershell
         run: |
           $server      = "${{ secrets.SQL_HOST }},${{ secrets.SQL_PORT }}"
           $dbName      = "${{ inputs.db_name }}"
@@ -280,7 +280,7 @@ jobs:
       # =====================================================
       - name: Generate report
         if: always() && steps.validate.outputs.has_scripts == 'true'
-        shell: pwsh
+        shell: powershell
         run: |
           $status      = "${{ steps.execute.outputs.status }}"
           $backupPath  = "${{ steps.backup.outputs.backup_path }}"
