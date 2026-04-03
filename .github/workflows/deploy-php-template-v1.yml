@@ -347,11 +347,11 @@ jobs:
           }
 
           # === TEMP: Force fail to test rollback ===
-          Write-Host "::error::Simulated deploy failure for rollback test"
-          exit 1
+          # Write-Host "::error::Simulated deploy failure for rollback test"
+          # exit 1
 
-          # Write-Host "Deployment completed successfully"
-          # exit 0
+          Write-Host "Deployment completed successfully"
+          exit 0
 
       # ────────────────────────────────────────────────────
       # Step 6: Restore preserve files & folders (ตาม config)
