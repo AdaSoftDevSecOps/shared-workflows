@@ -49,7 +49,7 @@ jobs:
         with:
           fetch-depth: 1
 
-      - name: DEBUG: List files
+      - name: DEBUG List files
         shell: powershell
         run: |
           Write-Host "PWD: $(Get-Location)"
