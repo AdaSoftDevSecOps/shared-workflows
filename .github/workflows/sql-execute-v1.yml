@@ -1,59 +1,36 @@
-# ============================================================================
-# Shared Workflow: SQL Script Executor with Backup
-# Repository: AdaSoftDevSecOps/shared-workflows
-# Path: .github/workflows/sql-execute.yml
-#
-# ลำดับรัน (ตายตัว — ห้ามรันแทรก):
-#   1. Script-StoreBack-Structure.sql
-#   2. Script-StoreBack-Stored.sql
-#   3. Script-StoreBack-Data.sql
-#
-# Compatible: Windows PowerShell 5.1 (shell: powershell)
-# ============================================================================
 name: SQL Script Executor
 
 on:
   workflow_call:
     inputs:
       db_name:
-        description: 'Target database name'
         required: true
         type: string
       project_name:
-        description: 'Project name for backup folder'
         required: true
         type: string
       backup_enabled:
-        description: 'Backup database before execution'
         required: false
         type: boolean
         default: true
       script_path:
-        description: 'Directory containing SQL scripts (relative to repo root)'
         required: false
         type: string
         default: '.'
       stop_on_error:
-        description: 'Stop remaining scripts if any step fails'
         required: false
         type: boolean
         default: true
       runner_label:
-        description: 'Self-hosted runner label (e.g. env-dev, env-prod)'
         required: true
         type: string
 
     secrets:
-      SQL_HOST:
-        required: true
-      SQL_PORT:
-        required: true
-      SQL_USER:
-        required: true
-      SQL_PASSWORD:
-        required: true
-      SQL_BACKUP_PATH:
-        required: true
+      SQL_HOST: { required: true }
+      SQL_PORT: { required: true }
+      SQL_USER: { required: true }
+      SQL_PASSWORD: { required: true }
+      SQL_BACKUP_PATH: { required: true }
 
 jobs:
   execute-sql:
@@ -66,22 +43,27 @@ jobs:
 
     steps:
       # =====================================================
-      # 1. Checkout caller repository
+      # 1. Checkout
       # =====================================================
-      - name: Checkout repository
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
         with:
           fetch-depth: 1
 
       # =====================================================
-      # 2. Validate script files
+      # 2. Validate scripts
       # =====================================================
       - name: Validate script files
         id: validate
         shell: powershell
+        env:
+          SCRIPT_PATH: ${{ inputs.script_path }}
         run: |
-          $scriptDir = "${{ inputs.script_path }}"
-          $scripts = @("Script-StoreBack-Structure.sql", "Script-StoreBack-Stored.sql", "Script-StoreBack-Data.sql")
+          $scriptDir = $env:SCRIPT_PATH
+          $scripts = @(
+            "Script-StoreBack-Structure.sql",
+            "Script-StoreBack-Stored.sql",
+            "Script-StoreBack-Data.sql"
+          )
 
           Write-Host "::group::Validating scripts in '$scriptDir'"
 
@@ -94,12 +76,11 @@ jobs:
               Write-Host "  [FOUND]   $script ($size bytes)"
               $foundList += $fullPath
             } else {
-              Write-Host "  [MISSING] $script — will be skipped"
+              Write-Host "  [MISSING] $script"
             }
           }
 
           if ($foundList.Count -eq 0) {
-            Write-Host "::warning::No StoreBack scripts found"
             echo "has_scripts=false" >> $env:GITHUB_OUTPUT
             Write-Host "::endgroup::"
             exit 0
@@ -108,29 +89,40 @@ jobs:
           echo "has_scripts=true" >> $env:GITHUB_OUTPUT
           echo "script_count=$($foundList.Count)" >> $env:GITHUB_OUTPUT
 
-          # สร้าง JSON array ด้วยมือ (compatible PS 5.1)
           $jsonItems = $foundList | ForEach-Object { '"' + ($_ -replace '\\', '\\') + '"' }
           $json = '[' + ($jsonItems -join ',') + ']'
           echo "script_list=$json" >> $env:GITHUB_OUTPUT
 
-          Write-Host "Will execute $($foundList.Count) of $($scripts.Count) scripts"
           Write-Host "::endgroup::"
 
       # =====================================================
-      # 3. Verify SQL Server connectivity
+      # 3. Verify connection
       # =====================================================
       - name: Verify SQL Server connection
         if: steps.validate.outputs.has_scripts == 'true'
         shell: powershell
+        env:
+          SQL_HOST: ${{ secrets.SQL_HOST }}
+          SQL_PORT: ${{ secrets.SQL_PORT }}
+          SQL_USER: ${{ secrets.SQL_USER }}
+          SQL_PASSWORD: ${{ secrets.SQL_PASSWORD }}
+          DB_NAME: ${{ inputs.db_name }}
         run: |
-          $server = "${{ secrets.SQL_HOST }},${{ secrets.SQL_PORT }}"
+          $server = "$env:SQL_HOST,$env:SQL_PORT"
 
-          Write-Host "::group::Connecting to [${{ inputs.db_name }}]"
+          Write-Host "::group::Connecting to [$env:DB_NAME]"
 
-          $result = sqlcmd -S $server -U "${{ secrets.SQL_USER }}" -P "${{ secrets.SQL_PASSWORD }}" -d "${{ inputs.db_name }}" -Q "SELECT @@SERVERNAME AS [Server], DB_NAME() AS [Database]" -W -h -1 2>&1
+          $result = sqlcmd `
+            -S $server `
+            -U $env:SQL_USER `
+            -P $env:SQL_PASSWORD `
+            -d $env:DB_NAME `
+            -Q "SELECT @@SERVERNAME, DB_NAME()" `
+            -W -h -1 2>&1
 
           if ($LASTEXITCODE -ne 0) {
-            Write-Host "::error::Connection failed: $result"
+            Write-Host "::error::Connection failed"
+            Write-Host $result
             exit 1
           }
 
@@ -138,112 +130,95 @@ jobs:
           Write-Host "::endgroup::"
 
       # =====================================================
-      # 4. Backup Database
+      # 4. Backup
       # =====================================================
       - name: Backup database
         if: inputs.backup_enabled && steps.validate.outputs.has_scripts == 'true'
         id: backup
         shell: powershell
+        env:
+          SQL_HOST: ${{ secrets.SQL_HOST }}
+          SQL_PORT: ${{ secrets.SQL_PORT }}
+          SQL_USER: ${{ secrets.SQL_USER }}
+          SQL_PASSWORD: ${{ secrets.SQL_PASSWORD }}
+          DB_NAME: ${{ inputs.db_name }}
+          PROJECT_NAME: ${{ inputs.project_name }}
+          BACKUP_BASE: ${{ secrets.SQL_BACKUP_PATH }}
         run: |
-          $server      = "${{ secrets.SQL_HOST }},${{ secrets.SQL_PORT }}"
-          $dbName      = "${{ inputs.db_name }}"
-          $projectName = "${{ inputs.project_name }}"
-          $backupBase  = "${{ secrets.SQL_BACKUP_PATH }}"
-          $timestamp   = Get-Date -Format "yyyyMMdd_HHmmss"
+          $server    = "$env:SQL_HOST,$env:SQL_PORT"
+          $timestamp = Get-Date -Format "yyyyMMdd_HHmmss"
 
-          $backupDir  = Join-Path $backupBase $projectName
-          $backupFile = $dbName + "_" + $timestamp + "_pre-deploy.bak"
+          $backupDir  = Join-Path $env:BACKUP_BASE $env:PROJECT_NAME
+          $backupFile = "$($env:DB_NAME)_$timestamp.bak"
           $backupPath = Join-Path $backupDir $backupFile
 
-          Write-Host "::group::Backing up [$dbName]"
+          Write-Host "::group::Backup [$env:DB_NAME]"
 
-          sqlcmd -S $server -U "${{ secrets.SQL_USER }}" -P "${{ secrets.SQL_PASSWORD }}" -Q "EXEC master.dbo.xp_create_subdir N'$backupDir';" 2>&1 | Write-Host
+          sqlcmd -S $server -U $env:SQL_USER -P $env:SQL_PASSWORD `
+            -Q "EXEC master.dbo.xp_create_subdir N'$backupDir';"
 
-          $backupSql = "BACKUP DATABASE [$dbName] TO DISK = N'$backupPath' WITH COMPRESSION, CHECKSUM, INIT, STATS = 10, NAME = N'$dbName - Pre-Deploy $timestamp';"
+          $sql = "BACKUP DATABASE [$env:DB_NAME] TO DISK = N'$backupPath' WITH INIT, COMPRESSION, CHECKSUM"
 
-          $result = sqlcmd -S $server -U "${{ secrets.SQL_USER }}" -P "${{ secrets.SQL_PASSWORD }}" -Q $backupSql 2>&1
+          $result = sqlcmd -S $server -U $env:SQL_USER -P $env:SQL_PASSWORD -Q $sql 2>&1
 
           if ($LASTEXITCODE -ne 0) {
-            Write-Host "::error::Backup FAILED — aborting"
+            Write-Host "::error::Backup failed"
             Write-Host $result
             exit 1
           }
 
-          Write-Host $result
-          Write-Host "Backup completed: $backupPath"
           echo "backup_path=$backupPath" >> $env:GITHUB_OUTPUT
           Write-Host "::endgroup::"
 
       # =====================================================
-      # 5. Execute: Structure → Stored → Data
+      # 5. Execute scripts
       # =====================================================
-      - name: "Execute: Structure -> Stored -> Data"
+      - name: Execute scripts
         if: steps.validate.outputs.has_scripts == 'true'
         id: execute
         shell: powershell
+        env:
+          SQL_HOST: ${{ secrets.SQL_HOST }}
+          SQL_PORT: ${{ secrets.SQL_PORT }}
+          SQL_USER: ${{ secrets.SQL_USER }}
+          SQL_PASSWORD: ${{ secrets.SQL_PASSWORD }}
+          DB_NAME: ${{ inputs.db_name }}
+          STOP_ON_ERROR: ${{ inputs.stop_on_error }}
+          SCRIPT_LIST: ${{ steps.validate.outputs.script_list }}
         run: |
-          $server      = "${{ secrets.SQL_HOST }},${{ secrets.SQL_PORT }}"
-          $dbName      = "${{ inputs.db_name }}"
-          $scriptList  = '${{ steps.validate.outputs.script_list }}' | ConvertFrom-Json
-          $stopOnError = [System.Boolean]::Parse("${{ inputs.stop_on_error }}")
-          $total       = $scriptList.Count
-          $success     = 0
-          $failed      = 0
-          $failedFiles = @()
+          $server = "$env:SQL_HOST,$env:SQL_PORT"
+          $scripts = $env:SCRIPT_LIST | ConvertFrom-Json
+          $stop = [System.Boolean]::Parse($env:STOP_ON_ERROR)
 
-          $stepLabels = @{}
-          $stepLabels["Script-StoreBack-Structure.sql"] = "STEP 1/3 — Structure (DDL)"
-          $stepLabels["Script-StoreBack-Stored.sql"]    = "STEP 2/3 — Stored Procedures"
-          $stepLabels["Script-StoreBack-Data.sql"]      = "STEP 3/3 — Data (DML)"
+          $failed = @()
 
-          Write-Host "::group::Executing $total script(s) on [$dbName]"
-          Write-Host "Order: Structure -> Stored -> Data"
-          Write-Host ""
+          foreach ($s in $scripts) {
+            Write-Host "Running: $s"
 
-          foreach ($scriptPath in $scriptList) {
-            $scriptName = Split-Path $scriptPath -Leaf
-            $label = $stepLabels[$scriptName]
-            if (-not $label) { $label = $scriptName }
-
-            Write-Host "============================================"
-            Write-Host "$label"
-            Write-Host "============================================"
-
-            $startTime = Get-Date
-
-            $result = sqlcmd -S $server -U "${{ secrets.SQL_USER }}" -P "${{ secrets.SQL_PASSWORD }}" -d $dbName -i "$scriptPath" -b -r1 2>&1
-
-            $duration = [math]::Round(((Get-Date) - $startTime).TotalSeconds, 1)
+            $result = sqlcmd `
+              -S $server `
+              -U $env:SQL_USER `
+              -P $env:SQL_PASSWORD `
+              -d $env:DB_NAME `
+              -i $s `
+              -b -r1 2>&1
 
             if ($LASTEXITCODE -ne 0) {
-              $failed++
-              $failedFiles += $scriptName
-              Write-Host "::error::FAILED: $scriptName ($duration s)"
+              Write-Host "::error::FAILED $s"
               Write-Host $result
+              $failed += $s
 
-              if ($stopOnError) {
-                Write-Host "::error::HALTING — remaining scripts will not run"
+              if ($stop) {
                 echo "status=FAILED" >> $env:GITHUB_OUTPUT
-                echo "failed_at=$scriptName" >> $env:GITHUB_OUTPUT
-                echo ("failed_files=" + ($failedFiles -join ',')) >> $env:GITHUB_OUTPUT
+                echo ("failed_files=" + ($failed -join ',')) >> $env:GITHUB_OUTPUT
                 exit 1
               }
-            } else {
-              $success++
-              Write-Host $result
-              Write-Host "SUCCESS: $scriptName ($duration s)"
             }
-
-            Write-Host ""
           }
 
-          Write-Host "====== COMPLETED ======"
-          Write-Host "Total: $total | Success: $success | Failed: $failed"
-          Write-Host "::endgroup::"
-
-          if ($failed -gt 0) {
+          if ($failed.Count -gt 0) {
             echo "status=PARTIAL_FAILURE" >> $env:GITHUB_OUTPUT
-            echo ("failed_files=" + ($failedFiles -join ',')) >> $env:GITHUB_OUTPUT
+            echo ("failed_files=" + ($failed -join ',')) >> $env:GITHUB_OUTPUT
             exit 1
           }
 
@@ -252,69 +227,28 @@ jobs:
       # =====================================================
       # 6. Report
       # =====================================================
-      - name: Generate report
+      - name: Report
         if: always() && steps.validate.outputs.has_scripts == 'true'
         shell: powershell
+        env:
+          STATUS: ${{ steps.execute.outputs.status }}
+          BACKUP: ${{ steps.backup.outputs.backup_path }}
+          FAILED: ${{ steps.execute.outputs.failed_files }}
+          DB_NAME: ${{ inputs.db_name }}
+          PROJECT: ${{ inputs.project_name }}
         run: |
-          $status      = "${{ steps.execute.outputs.status }}"
-          $backupPath  = "${{ steps.backup.outputs.backup_path }}"
-          $failedFiles = "${{ steps.execute.outputs.failed_files }}"
-          $scriptCount = "${{ steps.validate.outputs.script_count }}"
-          $dbName      = "${{ inputs.db_name }}"
-          $projName    = "${{ inputs.project_name }}"
-
-          $emoji = "INFO"
-          if ($status -eq "SUCCESS")         { $emoji = "SUCCESS" }
-          if ($status -eq "PARTIAL_FAILURE") { $emoji = "PARTIAL_FAILURE" }
-          if ($status -eq "FAILED")          { $emoji = "FAILED" }
-
           $lines = @()
           $lines += "## SQL Deployment Report"
           $lines += ""
-          $lines += "| Item | Detail |"
-          $lines += "|------|--------|"
-          $lines += "| **Project** | $projName |"
-          $lines += "| **Database** | ``$dbName`` |"
-          $lines += "| **Runner** | ``${{ inputs.runner_label }}`` |"
-          $lines += "| **Scripts** | $scriptCount |"
-          $lines += "| **Status** | **$emoji** |"
-          $lines += "| **Backup** | ``$backupPath`` |"
-          $lines += "| **Branch** | ``${{ github.ref_name }}`` |"
-          $lines += "| **By** | @${{ github.actor }} |"
-          $lines += ""
-          $lines += "### Execution Order"
-          $lines += ""
-          $lines += "| Step | Script | Status |"
-          $lines += "|------|--------|--------|"
+          $lines += "| DB | $env:DB_NAME |"
+          $lines += "| Project | $env:PROJECT |"
+          $lines += "| Status | $env:STATUS |"
+          $lines += "| Backup | $env:BACKUP |"
 
-          $allNames  = @("Script-StoreBack-Structure.sql", "Script-StoreBack-Stored.sql", "Script-StoreBack-Data.sql")
-          $allLabels = @("1", "2", "3")
-          $failedList = @()
-          if ($failedFiles) { $failedList = $failedFiles -split ',' }
-          $hitFailed = $false
-
-          for ($i = 0; $i -lt $allNames.Count; $i++) {
-            $n = $allNames[$i]
-            if ($hitFailed) {
-              $st = "Skipped"
-            } elseif ($failedList -contains $n) {
-              $st = "Failed"
-              $hitFailed = $true
-            } else {
-              $st = "Success"
-            }
-            $lines += "| $($allLabels[$i]) | ``$n`` | $st |"
-          }
-
-          if ($failedFiles -and $backupPath) {
+          if ($env:FAILED) {
             $lines += ""
-            $lines += "---"
-            $lines += "### Rollback"
-            $lines += "``````sql"
-            $lines += "ALTER DATABASE [$dbName] SET SINGLE_USER WITH ROLLBACK IMMEDIATE;"
-            $lines += "RESTORE DATABASE [$dbName] FROM DISK = N'$backupPath' WITH REPLACE;"
-            $lines += "ALTER DATABASE [$dbName] SET MULTI_USER;"
-            $lines += "``````"
+            $lines += "### Failed"
+            $lines += $env:FAILED
           }
 
-          $lines -join "`n" | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Encoding utf8
+          $lines -join "`n" | Out-File $env:GITHUB_STEP_SUMMARY -Encoding utf8
