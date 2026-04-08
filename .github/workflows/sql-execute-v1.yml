@@ -211,6 +211,7 @@ jobs:
               -P $env:SQL_PASSWORD `
               -d $env:DB_NAME `
               -i $s `
+              -f 65001 `
               -b -r1 2>&1
 
             if ($LASTEXITCODE -ne 0) {
