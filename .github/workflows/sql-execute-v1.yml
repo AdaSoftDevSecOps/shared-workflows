@@ -49,6 +49,12 @@ jobs:
         with:
           fetch-depth: 1
 
+      - name: DEBUG: List files
+        shell: powershell
+        run: |
+          Write-Host "PWD: $(Get-Location)"
+          Get-ChildItem -Recurse | Select-Object FullName
+
       # =====================================================
       # 2. Validate scripts
       # =====================================================
