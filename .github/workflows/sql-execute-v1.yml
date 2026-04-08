@@ -64,13 +64,13 @@ jobs:
         env:
           SCRIPT_PATH: ${{ inputs.script_path }}
         run: |
-          $scriptDir = $env:SCRIPT_PATH
+          $scriptDir = (Resolve-Path $env:SCRIPT_PATH).Path
           $scripts = @(
             "Script-StoreBack-Structure.sql",
             "Script-StoreBack-Stored.sql",
             "Script-StoreBack-Data.sql"
           )
-
+          
           Write-Host "::group::Validating scripts in '$scriptDir'"
 
           $foundList = @()
