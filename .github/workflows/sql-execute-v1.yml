@@ -64,7 +64,11 @@ jobs:
         env:
           SCRIPT_PATH: ${{ inputs.script_path }}
         run: |
-          $scriptDir = (Resolve-Path $env:SCRIPT_PATH).Path
+          if ($env:SCRIPT_PATH -eq '.') {
+            $scriptDir = (Get-Location).Path
+          } else {
+            $scriptDir = (Resolve-Path $env:SCRIPT_PATH).Path
+          }
           $scripts = @(
             "Script-StoreBack-Structure.sql",
             "Script-StoreBack-Stored.sql",
