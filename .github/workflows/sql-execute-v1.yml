@@ -24,11 +24,6 @@ on:
       runner_label:
         required: true
         type: string
-      script_names:
-        required: false
-        type: string
-        default: '[]'
-        description: 'JSON array of script names to execute, e.g. ["Script-StoreBack-Structure.sql","Script-StoreBack-Stored.sql"]'
 
     secrets:
       SQL_HOST: { required: true }
@@ -48,191 +43,73 @@ jobs:
 
     steps:
       # =====================================================
-      # 1. Checkout with full history for merge detection
+      # 1. Checkout
       # =====================================================
       - uses: actions/checkout@v4
         with:
-          fetch-depth: 0
+          fetch-depth: 1
 
-      - name: DEBUG - Show commit info
+      - name: DEBUG List files
         shell: powershell
         run: |
-          Write-Host "Current commit: ${{ github.sha }}"
-          Write-Host "Event name: ${{ github.event_name }}"
-          Write-Host "Previous commit: ${{ github.event.before }}"
-          Write-Host ""
-          Write-Host "Commit history (last 3):"
-          git log --oneline -3
-          Write-Host ""
-          Write-Host "Files in current commit:"
-          git diff-tree --no-commit-id --name-only -r ${{ github.sha }}
+          Write-Host "PWD: $(Get-Location)"
+          Get-ChildItem -Recurse | Select-Object FullName
 
       # =====================================================
-      # 2. Detect changed scripts (handle merge commits)
+      # 2. Validate scripts
       # =====================================================
-      - name: Detect changed SQL scripts
-        id: detect
+      - name: Validate script files
+        id: validate
         shell: powershell
         env:
           SCRIPT_PATH: ${{ inputs.script_path }}
-          SCRIPT_NAMES_JSON: ${{ inputs.script_names }}
         run: |
-          # Parse script names
-          $allowedScripts = @()
-          if ($env:SCRIPT_NAMES_JSON -and $env:SCRIPT_NAMES_JSON -ne '[]') {
-            $allowedScripts = $env:SCRIPT_NAMES_JSON | ConvertFrom-Json
-            Write-Host "Target scripts: $($allowedScripts -join ', ')"
-          } else {
-            Write-Host "No script_names provided"
-            echo "has_scripts=false" >> $env:GITHUB_OUTPUT
-            exit 0
-          }
-          
-          # Get script directory
           if ($env:SCRIPT_PATH -eq '.') {
             $scriptDir = (Get-Location).Path
           } else {
             $scriptDir = (Resolve-Path $env:SCRIPT_PATH).Path
           }
+          $scripts = @(
+            "Script-StoreBack-Structure.sql",
+            "Script-StoreBack-Stored.sql",
+            "Script-StoreBack-Data.sql"
+          )
           
-          $scriptsToRun = @()
-          
-          Write-Host "::group::Detecting SQL script changes"
-          
-          # Case 1: workflow_dispatch - run all scripts
-          if ($env:GITHUB_EVENT_NAME -eq 'workflow_dispatch') {
-            Write-Host "Manual trigger - running all scripts"
-            foreach ($script in $allowedScripts) {
-              $fullPath = Join-Path $scriptDir $script
-              if (Test-Path $fullPath) {
-                Write-Host "  [INCLUDE]  $script (manual)"
-                $scriptsToRun += $fullPath
-              } else {
-                Write-Host "  [MISSING]  $script"
-              }
+          Write-Host "::group::Validating scripts in '$scriptDir'"
+
+          $foundList = @()
+
+          foreach ($script in $scripts) {
+            $fullPath = Join-Path $scriptDir $script
+            if (Test-Path $fullPath) {
+              $size = (Get-Item $fullPath).Length
+              Write-Host "  [FOUND]   $script ($size bytes)"
+              $foundList += $fullPath
+            } else {
+              Write-Host "  [MISSING] $script"
             }
           }
-          else {
-            # Push event - detailed detection
-            $currentSha = "${{ github.sha }}"
-            $previousSha = "${{ github.event.before }}"
-            
-            Write-Host "Current commit: $currentSha"
-            Write-Host "Previous commit: $previousSha"
-            Write-Host ""
-            
-            # Check if this is a merge commit
-            $parentCount = git log -1 --format=%P $currentSha | ForEach-Object { ($_ -split ' ').Count }
-            $isMergeCommit = $parentCount -gt 1
-            
-            if ($isMergeCommit) {
-              Write-Host "🔀 Merge commit detected (parents: $parentCount)"
-              Write-Host ""
-              
-              # For merge commit: compare content with each parent
-              $parents = git log -1 --format=%P $currentSha
-              $parentArray = $parents -split ' '
-              
-              foreach ($script in $allowedScripts) {
-                $fullPath = Join-Path $scriptDir $script
-                $relativePath = Join-Path $env:SCRIPT_PATH $script
-                $relativePath = $relativePath -replace '\\', '/'
-                
-                if (Test-Path $fullPath) {
-                  $currentContent = Get-Content $fullPath -Raw -ErrorAction SilentlyContinue
-                  $changed = $false
-                  
-                  # Check against each parent
-                  foreach ($parent in $parentArray) {
-                    $parentContent = git show "$parent`:$relativePath" 2>&1
-                    if ($LASTEXITCODE -eq 0 -and $parentContent -ne $currentContent) {
-                      $changed = $true
-                      Write-Host "  [CHANGED]  $script - Different from parent $parent"
-                      break
-                    }
-                  }
-                  
-                  if ($changed) {
-                    $scriptsToRun += $fullPath
-                  } else {
-                    Write-Host "  [SKIP]     $script - Same as all parents"
-                  }
-                } else {
-                  Write-Host "  [MISSING]  $script"
-                }
-              }
-            }
-            else {
-              # Normal commit - compare with parent
-              Write-Host "📝 Normal commit detected"
-              Write-Host ""
-              
-              if ($previousSha -and $previousSha -ne '0000000000000000000000000000000000000000') {
-                # Has previous commit
-                $changedFiles = git diff --name-only $previousSha $currentSha
-                Write-Host "Changed files in this commit:"
-                $changedFiles | ForEach-Object { Write-Host "  $_" }
-                Write-Host ""
-                
-                foreach ($script in $allowedScripts) {
-                  $fullPath = Join-Path $scriptDir $script
-                  $relativePath = Join-Path $env:SCRIPT_PATH $script
-                  $relativePath = $relativePath -replace '\\', '/'
-                  
-                  if (Test-Path $fullPath) {
-                    if ($changedFiles -contains $relativePath -or $changedFiles -contains $script) {
-                      Write-Host "  [CHANGED]  $script"
-                      $scriptsToRun += $fullPath
-                    } else {
-                      Write-Host "  [SKIP]     $script"
-                    }
-                  } else {
-                    Write-Host "  [MISSING]  $script"
-                  }
-                }
-              }
-              else {
-                # First commit to branch
-                Write-Host "First commit - running all scripts"
-                foreach ($script in $allowedScripts) {
-                  $fullPath = Join-Path $scriptDir $script
-                  if (Test-Path $fullPath) {
-                    Write-Host "  [INCLUDE]  $script (first commit)"
-                    $scriptsToRun += $fullPath
-                  }
-                }
-              }
-            }
-          }
-          
-          # Output results
-          if ($scriptsToRun.Count -eq 0) {
+
+          if ($foundList.Count -eq 0) {
             echo "has_scripts=false" >> $env:GITHUB_OUTPUT
-            Write-Host ""
-            Write-Host "✅ No SQL scripts need to be executed."
             Write-Host "::endgroup::"
             exit 0
           }
-          
+
           echo "has_scripts=true" >> $env:GITHUB_OUTPUT
-          echo "script_count=$($scriptsToRun.Count)" >> $env:GITHUB_OUTPUT
-          
-          $jsonItems = $scriptsToRun | ForEach-Object { '"' + ($_ -replace '\\', '\\') + '"' }
+          echo "script_count=$($foundList.Count)" >> $env:GITHUB_OUTPUT
+
+          $jsonItems = $foundList | ForEach-Object { '"' + ($_ -replace '\\', '\\') + '"' }
           $json = '[' + ($jsonItems -join ',') + ']'
           echo "script_list=$json" >> $env:GITHUB_OUTPUT
-          
-          $scriptNames = $scriptsToRun | ForEach-Object { Split-Path $_ -Leaf }
-          echo "script_names=$($scriptNames -join ',')" >> $env:GITHUB_OUTPUT
-          
-          Write-Host ""
-          Write-Host "🚀 Scripts to execute: $($scriptNames -join ', ')"
+
           Write-Host "::endgroup::"
 
       # =====================================================
-      # 3. Verify SQL Server connection
+      # 3. Verify connection
       # =====================================================
       - name: Verify SQL Server connection
-        if: steps.detect.outputs.has_scripts == 'true'
+        if: steps.validate.outputs.has_scripts == 'true'
         shell: powershell
         env:
           SQL_HOST: ${{ secrets.SQL_HOST }}
@@ -263,10 +140,10 @@ jobs:
           Write-Host "::endgroup::"
 
       # =====================================================
-      # 4. Backup database
+      # 4. Backup
       # =====================================================
       - name: Backup database
-        if: inputs.backup_enabled && steps.detect.outputs.has_scripts == 'true'
+        if: inputs.backup_enabled && steps.validate.outputs.has_scripts == 'true'
         id: backup
         shell: powershell
         env:
@@ -287,9 +164,8 @@ jobs:
 
           Write-Host "::group::Backup [$env:DB_NAME]"
 
-          # Create backup directory if not exists
           sqlcmd -S $server -U $env:SQL_USER -P $env:SQL_PASSWORD `
-            -Q "EXEC master.dbo.xp_create_subdir N'$backupDir';" 2>&1 | Out-Null
+            -Q "EXEC master.dbo.xp_create_subdir N'$backupDir';"
 
           $sql = "BACKUP DATABASE [$env:DB_NAME] TO DISK = N'$backupPath' WITH INIT, COMPRESSION, CHECKSUM"
 
@@ -302,14 +178,13 @@ jobs:
           }
 
           echo "backup_path=$backupPath" >> $env:GITHUB_OUTPUT
-          Write-Host "Backup created: $backupPath"
           Write-Host "::endgroup::"
 
       # =====================================================
       # 5. Execute scripts
       # =====================================================
       - name: Execute scripts
-        if: steps.detect.outputs.has_scripts == 'true'
+        if: steps.validate.outputs.has_scripts == 'true'
         id: execute
         shell: powershell
         env:
@@ -319,24 +194,16 @@ jobs:
           SQL_PASSWORD: ${{ secrets.SQL_PASSWORD }}
           DB_NAME: ${{ inputs.db_name }}
           STOP_ON_ERROR: ${{ inputs.stop_on_error }}
-          SCRIPT_LIST: ${{ steps.detect.outputs.script_list }}
+          SCRIPT_LIST: ${{ steps.validate.outputs.script_list }}
         run: |
           $server = "$env:SQL_HOST,$env:SQL_PORT"
           $scripts = $env:SCRIPT_LIST | ConvertFrom-Json
           $stop = [System.Boolean]::Parse($env:STOP_ON_ERROR)
 
           $failed = @()
-          $executed = @()
-
-          Write-Host "::group::Executing SQL scripts"
-          Write-Host "Database: $env:DB_NAME"
-          Write-Host "Stop on error: $stop"
-          Write-Host ""
 
           foreach ($s in $scripts) {
-            $scriptName = Split-Path $s -Leaf
-            Write-Host "▶ Running: $scriptName"
-            Write-Host "  Path: $s"
+            Write-Host "Running: $s"
 
             $result = sqlcmd `
               -S $server `
@@ -348,88 +215,51 @@ jobs:
               -b -r1 2>&1
 
             if ($LASTEXITCODE -ne 0) {
-              Write-Host "  ✗ FAILED with exit code: $LASTEXITCODE"
-              Write-Host "  Error: $result"
-              $failed += $scriptName
+              Write-Host "::error::FAILED $s"
+              Write-Host $result
+              $failed += $s
 
               if ($stop) {
                 echo "status=FAILED" >> $env:GITHUB_OUTPUT
                 echo ("failed_files=" + ($failed -join ',')) >> $env:GITHUB_OUTPUT
-                Write-Host "::error::Stopping due to stop_on_error=true"
-                Write-Host "::endgroup::"
                 exit 1
               }
-            } else {
-              Write-Host "  ✓ SUCCESS"
-              $executed += $scriptName
             }
-            Write-Host ""
           }
 
           if ($failed.Count -gt 0) {
             echo "status=PARTIAL_FAILURE" >> $env:GITHUB_OUTPUT
             echo ("failed_files=" + ($failed -join ',')) >> $env:GITHUB_OUTPUT
-            echo ("executed_files=" + ($executed -join ',')) >> $env:GITHUB_OUTPUT
-            Write-Host "::endgroup::"
             exit 1
           }
 
           echo "status=SUCCESS" >> $env:GITHUB_OUTPUT
-          echo ("executed_files=" + ($executed -join ',')) >> $env:GITHUB_OUTPUT
-          Write-Host "::endgroup::"
 
       # =====================================================
       # 6. Report
       # =====================================================
       - name: Report
-        if: always() && steps.detect.outputs.has_scripts == 'true'
+        if: always() && steps.validate.outputs.has_scripts == 'true'
         shell: powershell
         env:
           STATUS: ${{ steps.execute.outputs.status }}
           BACKUP: ${{ steps.backup.outputs.backup_path }}
           FAILED: ${{ steps.execute.outputs.failed_files }}
-          EXECUTED: ${{ steps.execute.outputs.executed_files }}
-          SCRIPT_NAMES: ${{ steps.detect.outputs.script_names }}
           DB_NAME: ${{ inputs.db_name }}
           PROJECT: ${{ inputs.project_name }}
         run: |
           $lines = @()
           $lines += "## SQL Deployment Report"
           $lines += ""
-          $lines += "| **Database** | $env:DB_NAME |"
-          $lines += "| **Project** | $env:PROJECT |"
-          $lines += "| **Status** | $env:STATUS |"
-          
-          if ($env:EXECUTED) {
-            $lines += "| **Executed Scripts** | $env:EXECUTED |"
-          }
-          
-          if ($env:BACKUP) {
-            $lines += "| **Backup Path** | $env:BACKUP |"
-          } else {
-            $lines += "| **Backup** | Skipped (disabled or no scripts) |"
-          }
+          $lines += "| DB | $env:DB_NAME |"
+          $lines += "| Project | $env:PROJECT |"
+          $lines += "| Status | $env:STATUS |"
+          $lines += "| Backup | $env:BACKUP |"
 
           if ($env:FAILED) {
             $lines += ""
-            $lines += "### ❌ Failed Scripts"
-            $lines += "```"
+            $lines += "### Failed"
             $lines += $env:FAILED
-            $lines += "```"
-          }
-
-          if ($env:STATUS -eq "SUCCESS") {
-            $lines += ""
-            $lines += "### ✅ Deployment completed successfully"
-          } elseif ($env:STATUS -eq "PARTIAL_FAILURE") {
-            $lines += ""
-            $lines += "### ⚠️ Partial failure - some scripts failed"
-          } elseif ($env:STATUS -ne "SUCCESS" -and $env:STATUS) {
-            $lines += ""
-            $lines += "### ❌ Deployment failed"
           }
 
           $lines -join "`n" | Out-File $env:GITHUB_STEP_SUMMARY -Encoding utf8
-          
-          Write-Host "Report generated"
-          Write-Host "Status: $env:STATUS"
