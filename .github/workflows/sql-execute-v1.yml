@@ -206,11 +206,24 @@ jobs:
                   $relativePath = $relativePath -replace '\\', '/'
                   
                   if (Test-Path $fullPath) {
-                    if ($changedFiles -contains $relativePath -or $changedFiles -contains $script) {
-                      Write-Host "  [CHANGED]  $script"
-                      $scriptsToRun += $fullPath
-                    } else {
-                      Write-Host "  [SKIP]     $script"
+                    # Clean up paths for comparison
+                    $cleanChangedFiles = $changedFiles | ForEach-Object { $_.Trim() }
+                    $targetFile = $script.Trim()
+
+                    if ($cleanChangedFiles -contains $targetFile) {
+                        Write-Host "  [CHANGED]  $script (matched by filename)"
+                        $scriptsToRun += $fullPath
+                    }
+                    else {
+                        # Try matching with full path
+                        $cleanRelativePath = $relativePath.Trim() -replace '\\', '/'
+                        if ($cleanChangedFiles -contains $cleanRelativePath) {
+                            Write-Host "  [CHANGED]  $script (matched by relative path)"
+                            $scriptsToRun += $fullPath
+                        }
+                        else {
+                            Write-Host "  [SKIP]     $script"
+                        }
                     }
                   } else {
                     Write-Host "  [MISSING]  $script"
