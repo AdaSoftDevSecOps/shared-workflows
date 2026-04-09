@@ -144,8 +144,8 @@ jobs:
                   
                   # Check against each parent
                   foreach ($parent in $parentArray) {
-                    $parentContent = git show "$parent:$relativePath" 2>$null
-                    if ($parentContent -ne $currentContent) {
+                    $parentContent = git show "$parent`:$relativePath" 2>&1
+                    if ($LASTEXITCODE -eq 0 -and $parentContent -ne $currentContent) {
                       $changed = $true
                       Write-Host "  [CHANGED]  $script - Different from parent $parent"
                       break
