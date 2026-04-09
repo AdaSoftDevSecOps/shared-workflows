@@ -24,7 +24,6 @@ on:
       runner_label:
         required: true
         type: string
-      # NEW: List of script names to execute (JSON array format)
       script_names:
         required: false
         type: string
@@ -49,22 +48,27 @@ jobs:
 
     steps:
       # =====================================================
-      # 1. Checkout with fetch depth for change detection
+      # 1. Checkout with full history for merge detection
       # =====================================================
       - uses: actions/checkout@v4
         with:
-          fetch-depth: 2
+          fetch-depth: 0
 
-      - name: DEBUG List files
+      - name: DEBUG - Show commit info
         shell: powershell
         run: |
-          Write-Host "PWD: $(Get-Location)"
-          Write-Host "Script names from parameter: ${{ inputs.script_names }}"
-          Write-Host "Changed files in this commit:"
-          git diff --name-only HEAD~1 HEAD
+          Write-Host "Current commit: ${{ github.sha }}"
+          Write-Host "Event name: ${{ github.event_name }}"
+          Write-Host "Previous commit: ${{ github.event.before }}"
+          Write-Host ""
+          Write-Host "Commit history (last 3):"
+          git log --oneline -3
+          Write-Host ""
+          Write-Host "Files in current commit:"
+          git diff-tree --no-commit-id --name-only -r ${{ github.sha }}
 
       # =====================================================
-      # 2. Detect changed scripts (using dynamic script names)
+      # 2. Detect changed scripts (handle merge commits)
       # =====================================================
       - name: Detect changed SQL scripts
         id: detect
@@ -73,91 +77,130 @@ jobs:
           SCRIPT_PATH: ${{ inputs.script_path }}
           SCRIPT_NAMES_JSON: ${{ inputs.script_names }}
         run: |
-          # Parse script names from parameter (JSON array)
+          # Parse script names
           $allowedScripts = @()
           if ($env:SCRIPT_NAMES_JSON -and $env:SCRIPT_NAMES_JSON -ne '[]') {
-            try {
-              $allowedScripts = $env:SCRIPT_NAMES_JSON | ConvertFrom-Json
-              Write-Host "Using script names from parameter: $($allowedScripts -join ', ')"
-            } catch {
-              Write-Host "::error::Invalid script_names JSON format: $env:SCRIPT_NAMES_JSON"
-              exit 1
-            }
+            $allowedScripts = $env:SCRIPT_NAMES_JSON | ConvertFrom-Json
+            Write-Host "Target scripts: $($allowedScripts -join ', ')"
           } else {
-            # Fallback: Auto-detect all .sql files in directory (legacy behavior)
-            Write-Host "No script_names provided, auto-detecting all .sql files..."
-            if ($env:SCRIPT_PATH -eq '.') {
-              $scriptDir = (Get-Location).Path
-            } else {
-              $scriptDir = (Resolve-Path $env:SCRIPT_PATH).Path
-            }
-            $allowedScripts = Get-ChildItem -Path $scriptDir -Filter "*.sql" | ForEach-Object { $_.Name }
-            Write-Host "Auto-detected scripts: $($allowedScripts -join ', ')"
+            Write-Host "No script_names provided"
+            echo "has_scripts=false" >> $env:GITHUB_OUTPUT
+            exit 0
           }
           
-          # Determine script directory
+          # Get script directory
           if ($env:SCRIPT_PATH -eq '.') {
             $scriptDir = (Get-Location).Path
           } else {
             $scriptDir = (Resolve-Path $env:SCRIPT_PATH).Path
           }
           
-          # Get changed files in this commit (compared to previous commit)
-          $changedFiles = git diff --name-only HEAD~1 HEAD
-          
-          Write-Host "::group::Detecting changed scripts in '$scriptDir'"
-          Write-Host "Changed files in this commit:"
-          $changedFiles | ForEach-Object { Write-Host "  $_" }
-          Write-Host ""
-          Write-Host "Looking for these scripts: $($allowedScripts -join ', ')"
-          Write-Host ""
-          
-          # Find which allowed scripts have changed
           $scriptsToRun = @()
           
-          foreach ($script in $allowedScripts) {
-            $fullPath = Join-Path $scriptDir $script
-            $relativePath = Join-Path $env:SCRIPT_PATH $script
-            $relativePath = $relativePath -replace '\\', '/'
-            
-            # Check if file exists
-            if (Test-Path $fullPath) {
-              # Check if file was changed
-              $changed = $changedFiles | Where-Object { 
-                $_ -eq $relativePath -or 
-                $_ -eq $script -or
-                $_ -eq $script.Replace('/', '\')  # Handle Windows path
-              }
-              
-              if ($changed) {
-                Write-Host "  [CHANGED]  $script - Will be executed"
-                $scriptsToRun += $fullPath
-              } else {
-                Write-Host "  [SKIP]     $script - No changes detected"
-              }
-            } else {
-              Write-Host "  [MISSING]  $script - File not found in $scriptDir"
-            }
-          }
+          Write-Host "::group::Detecting SQL script changes"
           
-          # Check if this is first commit or manual trigger (workflow_dispatch)
-          $isFirstCommit = $false
-          try {
-            $prevCommit = git rev-parse HEAD~1 2>$null
-            if (-not $prevCommit) { $isFirstCommit = $true }
-          } catch { $isFirstCommit = $true }
-          
-          # For manual trigger or first commit, run all existing scripts
-          if ($env:GITHUB_EVENT_NAME -eq 'workflow_dispatch' -or $isFirstCommit) {
-            Write-Host ""
-            Write-Host "Manual trigger or first commit - checking all scripts..."
-            $scriptsToRun = @()
-            
+          # Case 1: workflow_dispatch - run all scripts
+          if ($env:GITHUB_EVENT_NAME -eq 'workflow_dispatch') {
+            Write-Host "Manual trigger - running all scripts"
             foreach ($script in $allowedScripts) {
               $fullPath = Join-Path $scriptDir $script
               if (Test-Path $fullPath) {
-                Write-Host "  [INCLUDE]  $script - Manual run or first commit"
+                Write-Host "  [INCLUDE]  $script (manual)"
                 $scriptsToRun += $fullPath
+              } else {
+                Write-Host "  [MISSING]  $script"
+              }
+            }
+          }
+          else {
+            # Push event - detailed detection
+            $currentSha = "${{ github.sha }}"
+            $previousSha = "${{ github.event.before }}"
+            
+            Write-Host "Current commit: $currentSha"
+            Write-Host "Previous commit: $previousSha"
+            Write-Host ""
+            
+            # Check if this is a merge commit
+            $parentCount = git log -1 --format=%P $currentSha | ForEach-Object { ($_ -split ' ').Count }
+            $isMergeCommit = $parentCount -gt 1
+            
+            if ($isMergeCommit) {
+              Write-Host "🔀 Merge commit detected (parents: $parentCount)"
+              Write-Host ""
+              
+              # For merge commit: compare content with each parent
+              $parents = git log -1 --format=%P $currentSha
+              $parentArray = $parents -split ' '
+              
+              foreach ($script in $allowedScripts) {
+                $fullPath = Join-Path $scriptDir $script
+                $relativePath = Join-Path $env:SCRIPT_PATH $script
+                $relativePath = $relativePath -replace '\\', '/'
+                
+                if (Test-Path $fullPath) {
+                  $currentContent = Get-Content $fullPath -Raw -ErrorAction SilentlyContinue
+                  $changed = $false
+                  
+                  # Check against each parent
+                  foreach ($parent in $parentArray) {
+                    $parentContent = git show "$parent:$relativePath" 2>$null
+                    if ($parentContent -ne $currentContent) {
+                      $changed = $true
+                      Write-Host "  [CHANGED]  $script - Different from parent $parent"
+                      break
+                    }
+                  }
+                  
+                  if ($changed) {
+                    $scriptsToRun += $fullPath
+                  } else {
+                    Write-Host "  [SKIP]     $script - Same as all parents"
+                  }
+                } else {
+                  Write-Host "  [MISSING]  $script"
+                }
+              }
+            }
+            else {
+              # Normal commit - compare with parent
+              Write-Host "📝 Normal commit detected"
+              Write-Host ""
+              
+              if ($previousSha -and $previousSha -ne '0000000000000000000000000000000000000000') {
+                # Has previous commit
+                $changedFiles = git diff --name-only $previousSha $currentSha
+                Write-Host "Changed files in this commit:"
+                $changedFiles | ForEach-Object { Write-Host "  $_" }
+                Write-Host ""
+                
+                foreach ($script in $allowedScripts) {
+                  $fullPath = Join-Path $scriptDir $script
+                  $relativePath = Join-Path $env:SCRIPT_PATH $script
+                  $relativePath = $relativePath -replace '\\', '/'
+                  
+                  if (Test-Path $fullPath) {
+                    if ($changedFiles -contains $relativePath -or $changedFiles -contains $script) {
+                      Write-Host "  [CHANGED]  $script"
+                      $scriptsToRun += $fullPath
+                    } else {
+                      Write-Host "  [SKIP]     $script"
+                    }
+                  } else {
+                    Write-Host "  [MISSING]  $script"
+                  }
+                }
+              }
+              else {
+                # First commit to branch
+                Write-Host "First commit - running all scripts"
+                foreach ($script in $allowedScripts) {
+                  $fullPath = Join-Path $scriptDir $script
+                  if (Test-Path $fullPath) {
+                    Write-Host "  [INCLUDE]  $script (first commit)"
+                    $scriptsToRun += $fullPath
+                  }
+                }
               }
             }
           }
@@ -166,7 +209,7 @@ jobs:
           if ($scriptsToRun.Count -eq 0) {
             echo "has_scripts=false" >> $env:GITHUB_OUTPUT
             Write-Host ""
-            Write-Host "No SQL scripts need to be executed."
+            Write-Host "✅ No SQL scripts need to be executed."
             Write-Host "::endgroup::"
             exit 0
           }
@@ -174,21 +217,19 @@ jobs:
           echo "has_scripts=true" >> $env:GITHUB_OUTPUT
           echo "script_count=$($scriptsToRun.Count)" >> $env:GITHUB_OUTPUT
           
-          # Create JSON array of scripts to run
           $jsonItems = $scriptsToRun | ForEach-Object { '"' + ($_ -replace '\\', '\\') + '"' }
           $json = '[' + ($jsonItems -join ',') + ']'
           echo "script_list=$json" >> $env:GITHUB_OUTPUT
           
-          # Also output list of script names for reporting
           $scriptNames = $scriptsToRun | ForEach-Object { Split-Path $_ -Leaf }
           echo "script_names=$($scriptNames -join ',')" >> $env:GITHUB_OUTPUT
           
           Write-Host ""
-          Write-Host "Scripts to execute: $($scriptNames -join ', ')"
+          Write-Host "🚀 Scripts to execute: $($scriptNames -join ', ')"
           Write-Host "::endgroup::"
 
       # =====================================================
-      # 3. Verify connection (only if scripts need to run)
+      # 3. Verify SQL Server connection
       # =====================================================
       - name: Verify SQL Server connection
         if: steps.detect.outputs.has_scripts == 'true'
@@ -222,7 +263,7 @@ jobs:
           Write-Host "::endgroup::"
 
       # =====================================================
-      # 4. Backup (only if scripts need to run)
+      # 4. Backup database
       # =====================================================
       - name: Backup database
         if: inputs.backup_enabled && steps.detect.outputs.has_scripts == 'true'
@@ -265,7 +306,7 @@ jobs:
           Write-Host "::endgroup::"
 
       # =====================================================
-      # 5. Execute scripts (only changed ones)
+      # 5. Execute scripts
       # =====================================================
       - name: Execute scripts
         if: steps.detect.outputs.has_scripts == 'true'
