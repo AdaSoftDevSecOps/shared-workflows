@@ -77,6 +77,22 @@ jobs:
           Write-Host "`nGit diff:"
           git diff --name-only ${{ github.event.before }} ${{ github.sha }}
 
+      - name: Debug git info
+        run: |
+          Write-Host "Current commit: ${{ github.sha }}"
+          Write-Host "Previous commit: ${{ github.event.before }}"
+          Write-Host "Event name: ${{ github.event_name }}"
+          Write-Host ""
+          Write-Host "Parent commits:"
+          git log -1 --format=%P ${{ github.sha }}
+          Write-Host ""
+          Write-Host "Is merge commit?"
+          $parentCount = (git log -1 --format=%P ${{ github.sha }}).Split(' ').Count
+          Write-Host "Parent count: $parentCount"
+          Write-Host ""
+          Write-Host "Files changed between commits:"
+          git diff --name-only ${{ github.event.before }} ${{ github.sha }}
+
       # =====================================================
       # 2. Detect changed scripts (handle merge commits)
       # =====================================================
