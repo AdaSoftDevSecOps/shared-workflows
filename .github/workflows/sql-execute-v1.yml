@@ -199,6 +199,15 @@ jobs:
                 Write-Host "Changed files in this commit:"
                 $changedFiles | ForEach-Object { Write-Host "  $_" }
                 Write-Host ""
+
+                # Debug: แสดงค่าจริง
+                Write-Host "DEBUG: changedFiles raw:"
+                Write-Host "---"
+                $changedFiles | ForEach-Object { Write-Host "[$_]" }
+                Write-Host "---"
+                
+                Write-Host "DEBUG: Type of changedFiles: $($changedFiles.GetType())"
+                Write-Host "DEBUG: Count: $($changedFiles.Count)"
                 
                 foreach ($script in $allowedScripts) {
                   $fullPath = Join-Path $scriptDir $script
