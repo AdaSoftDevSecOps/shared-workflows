@@ -67,6 +67,16 @@ jobs:
           Write-Host "Files in current commit:"
           git diff-tree --no-commit-id --name-only -r ${{ github.sha }}
 
+      - name: Debug - List files and git status
+        run: |
+          Write-Host "Current directory: $(Get-Location)"
+          Write-Host "Files in repo:"
+          Get-ChildItem -Recurse -Filter "*.sql" | ForEach-Object { $_.FullName }
+          Write-Host "`nGit status:"
+          git status
+          Write-Host "`nGit diff:"
+          git diff --name-only ${{ github.event.before }} ${{ github.sha }}
+
       # =====================================================
       # 2. Detect changed scripts (handle merge commits)
       # =====================================================
