@@ -328,7 +328,11 @@ jobs:
         shell: powershell
         run: |
           Write-Host "Deploying $env:PROJECT_NAME to $env:DEPLOY_PATH ..."
-          Write-Host "Mode: $([string]::Equals($env:EXISTING_DEPLOYMENT, 'true') ? 'Update' : 'First-time deploy')"
+          if ($env:EXISTING_DEPLOYMENT -eq 'true') {
+              Write-Host "Mode: Update"
+          } else {
+              Write-Host "Mode: First-time deploy"
+          }
 
           if (!(Test-Path -Path $env:DEPLOY_PATH)) {
             New-Item -ItemType Directory -Path $env:DEPLOY_PATH -Force | Out-Null
