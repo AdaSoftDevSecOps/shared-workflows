@@ -23,7 +23,12 @@ on:
         type: string
 
       source-subfolder:
-        description: "Subfolder ใน repo ที่จะ deploy (ถ้าไม่ระบุ = ใช้ root หรือ auto-detect 'app')"
+        description: >
+          Subfolder ใน repo ที่จะ deploy 
+          - ไม่ระบุ หรือ ใส่ "" = ใช้ root ของ repo ทั้งหมด
+          - ใส่ "app" = deploy เฉพาะ ./app
+          - ใส่ "public" = deploy เฉพาะ ./public
+          - ใส่ "./src/Frontend" = deploy เฉพาะ ./src/Frontend
         required: false
         type: string
         default: ""
@@ -143,18 +148,35 @@ jobs:
           }
 
       # ────────────────────────────────────────────────────
-      # Step 3: Selective Backup — ZIP เฉพาะไฟล์ที่ถูกแก้ไขจริง (git diff)
+      # Step 2.5: Check if deploy path has existing files
       # ────────────────────────────────────────────────────
-      - name: Backup only actually changed files
+      - name: Check existing deployment
         shell: powershell
         run: |
-          if (!(Test-Path -Path $env:DEPLOY_PATH)) {
-            Write-Host "No existing deployment found - skipping backup"
-            return
+          if (Test-Path -Path $env:DEPLOY_PATH) {
+            $files = Get-ChildItem -Path $env:DEPLOY_PATH -File -Recurse -ErrorAction SilentlyContinue
+            $folders = Get-ChildItem -Path $env:DEPLOY_PATH -Directory -ErrorAction SilentlyContinue
+            
+            if ($files.Count -gt 0 -or $folders.Count -gt 0) {
+              echo "EXISTING_DEPLOYMENT=true" >> $env:GITHUB_ENV
+              Write-Host "Found existing deployment with $($files.Count) file(s) and $($folders.Count) folder(s)"
+            } else {
+              echo "EXISTING_DEPLOYMENT=false" >> $env:GITHUB_ENV
+              Write-Host "Deploy path exists but is empty (fresh directory)"
+            }
+          } else {
+            echo "EXISTING_DEPLOYMENT=false" >> $env:GITHUB_ENV
+            Write-Host "Deploy path does not exist (new deployment)"
           }
 
+      # ────────────────────────────────────────────────────
+      # Step 3: Selective Backup — เฉพาะเมื่อมี deployment อยู่เดิม
+      # ────────────────────────────────────────────────────
+      - name: Backup only actually changed files
+        if: env.EXISTING_DEPLOYMENT == 'true'
+        shell: powershell
+        run: |
           # --- Get changed files: ใช้ HEAD~1 เทียบกับ HEAD ---
-          # fetch-depth: 2 ทำให้มี parent commit อยู่แล้ว ไม่ต้อง fetch เพิ่ม
           try {
             $changedFiles = git diff --name-only HEAD~1 HEAD 2>&1
             if ($LASTEXITCODE -ne 0) { throw "git diff failed" }
@@ -175,9 +197,9 @@ jobs:
           $sourcePrefix = ""
           $customSub = "${{ inputs.source-subfolder }}"
           if ($customSub -ne '') {
-            $sourcePrefix = "$customSub/"
-          } elseif (Test-Path -Path (Join-Path $env:GITHUB_WORKSPACE "app")) {
-            $sourcePrefix = "app/"
+            # Normalize path: remove leading ./ or /, add trailing /
+            $normalizedSub = $customSub -replace '^\./', '' -replace '^/', ''
+            $sourcePrefix = if ($normalizedSub -ne '') { "$normalizedSub/" } else { "" }
           }
 
           # --- Build exclude lists ---
@@ -263,16 +285,12 @@ jobs:
           Remove-Item -Path $tempBackupDir -Recurse -Force -ErrorAction SilentlyContinue
 
       # ────────────────────────────────────────────────────
-      # Step 4: Backup preserve files & folders (ตาม config)
+      # Step 4: Backup preserve files & folders (เฉพาะเมื่อมี deployment อยู่เดิม)
       # ────────────────────────────────────────────────────
       - name: Backup preserve files and folders
+        if: env.EXISTING_DEPLOYMENT == 'true'
         shell: powershell
         run: |
-          if (!(Test-Path -Path $env:DEPLOY_PATH)) {
-            Write-Host "No existing deployment - skipping preserve backup"
-            return
-          }
-
           Write-Host "=== Backing up preserve files ==="
 
           # --- Preserve Files ---
@@ -304,11 +322,17 @@ jobs:
 
       # ────────────────────────────────────────────────────
       # Step 5: Deploy new files (robocopy)
+      # รองรับทั้งกรณี First-time deploy และ Update
       # ────────────────────────────────────────────────────
       - name: Deploy new files
         shell: powershell
         run: |
           Write-Host "Deploying $env:PROJECT_NAME to $env:DEPLOY_PATH ..."
+          if ($env:EXISTING_DEPLOYMENT -eq 'true') {
+              Write-Host "Mode: Update"
+          } else {
+              Write-Host "Mode: First-time deploy"
+          }
 
           if (!(Test-Path -Path $env:DEPLOY_PATH)) {
             New-Item -ItemType Directory -Path $env:DEPLOY_PATH -Force | Out-Null
@@ -317,13 +341,24 @@ jobs:
           # Determine source path
           $sourcePath = $env:GITHUB_WORKSPACE
           $customSub = "${{ inputs.source-subfolder }}"
+          
           if ($customSub -ne '') {
-            $sourcePath = Join-Path $env:GITHUB_WORKSPACE $customSub
-            Write-Host "Using custom subfolder: $customSub"
-          } elseif (Test-Path -Path (Join-Path $env:GITHUB_WORKSPACE "app")) {
-            $sourcePath = Join-Path $env:GITHUB_WORKSPACE "app"
-            Write-Host "Auto-detected 'app' directory"
+            # Remove leading ./ or / if present, then join
+            $normalizedSub = $customSub -replace '^\./', '' -replace '^/', ''
+            $sourcePath = Join-Path $env:GITHUB_WORKSPACE $normalizedSub
+            Write-Host "Using custom subfolder: $customSub → normalized: $normalizedSub"
+          } else {
+            # ไม่ระบุ = ใช้ root ของ repo ทั้งหมด
+            Write-Host "Using repo root (full project deployment)"
           }
+          
+          # Verify source path exists
+          if (!(Test-Path -Path $sourcePath)) {
+            Write-Host "::error::Source path does not exist: $sourcePath"
+            Write-Host "Please check your 'source-subfolder' input value"
+            exit 1
+          }
+          
           Write-Host "Source: $sourcePath"
 
           # Build robocopy exclude arguments
@@ -336,6 +371,7 @@ jobs:
           if ($excludeFiles.Count -gt 0) { $xfArgs = @("/XF") + $excludeFiles }
           if ($excludeFolders.Count -gt 0) { $xdArgs = @("/XD") + $excludeFolders }
 
+          # ใช้ /E เพื่อความปลอดภัย (ไม่ลบไฟล์ใดๆ บน server)
           $robocopyArgs = @($sourcePath, $env:DEPLOY_PATH, "/E") + $xfArgs + $xdArgs + @("/NFL", "/NDL", "/NJH", "/NJS")
 
           Write-Host "robocopy $($robocopyArgs -join ' ')"
@@ -346,17 +382,14 @@ jobs:
             exit 1
           }
 
-          # === TEMP: Force fail to test rollback ===
-          # Write-Host "::error::Simulated deploy failure for rollback test"
-          # exit 1
-
           Write-Host "Deployment completed successfully"
           exit 0
 
       # ────────────────────────────────────────────────────
-      # Step 6: Restore preserve files & folders (ตาม config)
+      # Step 6: Restore preserve files & folders (เฉพาะเมื่อมี deployment อยู่เดิม)
       # ────────────────────────────────────────────────────
       - name: Restore preserve files and folders
+        if: env.EXISTING_DEPLOYMENT == 'true'
         shell: powershell
         run: |
           Write-Host "=== Restoring preserve files ==="
@@ -384,7 +417,7 @@ jobs:
               Write-Host "  Restoring folder: $folder from $($latestZip.Name)"
               Expand-Archive -Path $latestZip.FullName -DestinationPath $destFolder -Force
             } else {
-              Write-Host "  No backup found for folder: $folder - skipping"
+              Write-Host "  No backup found for folder: $folder - skipping (first-time deploy?)"
             }
           }
 
@@ -432,24 +465,26 @@ jobs:
             Write-Host "  Warning: $verifyFile not found"
           }
 
-          # Verify preserve files
-          $files = $env:PRESERVE_FILES -split ',' | ForEach-Object { $_.Trim() } | Where-Object { $_ -ne '' }
-          foreach ($file in $files) {
-            $path = Join-Path $env:DEPLOY_PATH $file
-            if (Test-Path -Path $path) {
-              Write-Host "  OK: $file restored"
-            } else {
-              Write-Host "  Warning: $file not restored"
+          # Verify preserve files (เฉพาะเมื่อมีการ restore เท่านั้น)
+          if ($env:EXISTING_DEPLOYMENT -eq 'true') {
+            $files = $env:PRESERVE_FILES -split ',' | ForEach-Object { $_.Trim() } | Where-Object { $_ -ne '' }
+            foreach ($file in $files) {
+              $path = Join-Path $env:DEPLOY_PATH $file
+              if (Test-Path -Path $path) {
+                Write-Host "  OK: $file restored"
+              } else {
+                Write-Host "  Warning: $file not restored"
+              }
             }
           }
 
           Write-Host "=== Verification completed ==="
 
       # ────────────────────────────────────────────────────
-      # Step 9: Rollback on failure (ใช้ robocopy แทน Remove+Expand)
+      # Step 9: Rollback on failure (เฉพาะเมื่อมี deployment อยู่เดิม)
       # ────────────────────────────────────────────────────
       - name: Rollback on failure
-        if: failure()
+        if: failure() && env.EXISTING_DEPLOYMENT == 'true'
         shell: powershell
         run: |
           Write-Host "::error::Workflow failed! Initiating rollback..."
@@ -474,11 +509,7 @@ jobs:
           New-Item -ItemType Directory -Path $rollbackTemp -Force | Out-Null
           Expand-Archive -Path $latestBackup.FullName -DestinationPath $rollbackTemp -Force
 
-          # --- Use robocopy to restore (handles locked files + permissions better) ---
-          # /IS = include same files (overwrite even if identical)
-          # /IT = include tweaked files
-          # /R:3 /W:5 = retry 3 times, wait 5 sec (handles temp locks)
-          # /B = backup mode (ใช้ SeBackupPrivilege bypass permission issues)
+          # --- Use robocopy to restore ---
           $robocopyArgs = @(
             $rollbackTemp,
             $env:DEPLOY_PATH,
@@ -491,7 +522,6 @@ jobs:
           & robocopy @robocopyArgs
           $roboExit = $LASTEXITCODE
 
-          # If normal mode fails with permission error (exit >= 8), retry with /B (backup mode)
           if ($roboExit -ge 8) {
             Write-Host "::warning::Normal robocopy failed (exit $roboExit). Retrying with /B (backup mode)..."
             $robocopyArgsBackup = $robocopyArgs + @("/B")
