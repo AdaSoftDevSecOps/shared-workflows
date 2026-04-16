@@ -169,6 +169,13 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.github-token }}
         run: |
+          # แปลงชื่อ branch ให้สวยงาม (สำหรับแสดงใน title)
+          SOURCE_DISPLAY="${{ inputs.source-branch }}"
+          TARGET_DISPLAY="${{ inputs.target-branch }}"
+          
+          # สร้าง arrow indicator
+          ARROW="→"
+          
           PR_BODY=$(cat <<EOF
           ## 🚀 Deployment Request: ${{ inputs.project-name }}
           
@@ -201,11 +208,14 @@ jobs:
           EOF
           )
           
+          # สร้าง Title ที่แสดง source → target อย่างชัดเจน
+          PR_TITLE="[${{ inputs.project-name }}] ${{ inputs.source-branch }} → ${{ inputs.target-branch }} (${{ steps.commits.outputs.count }} commit(s))"
+          
           if [ "${{ steps.check.outputs.exists }}" == "true" ]; then
             if [ "${{ inputs.auto-update-existing }}" == "true" ]; then
               # Update existing PR
               gh pr edit ${{ steps.check.outputs.pr_number }} \
-                --title "[${{ inputs.project-name }}] ${{ steps.commits.outputs.count }} commits pending" \
+                --title "$PR_TITLE" \
                 --body "$PR_BODY"
               
               echo "action=updated" >> $GITHUB_OUTPUT
@@ -223,7 +233,7 @@ jobs:
             PR_URL=$(gh pr create \
               --base ${{ inputs.target-branch }} \
               --head ${{ inputs.source-branch }} \
-              --title "[${{ inputs.project-name }}] Deploy ${{ steps.commits.outputs.count }} commit(s)" \
+              --title "$PR_TITLE" \
               --body "$PR_BODY" \
               ${{ inputs.assignees != '' && format('--assignee "{0}"', inputs.assignees) || '' }} \
               ${{ inputs.reviewers != '' && format('--reviewer "{0}"', inputs.reviewers) || '' }} \
@@ -257,7 +267,9 @@ jobs:
               -d '{
                 "text": "📋 PR ${{ steps.pr.outputs.action }}: ${{ steps.pr.outputs.pr_url }}",
                 "project": "${{ inputs.project-name }}",
-                "commits": ${{ steps.commits.outputs.count }}
+                "commits": ${{ steps.commits.outputs.count }},
+                "source": "${{ inputs.source-branch }}",
+                "target": "${{ inputs.target-branch }}"
               }' || true
           fi
 
