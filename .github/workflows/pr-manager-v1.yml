@@ -72,7 +72,7 @@ on:
         description: "Merge method: merge, squash, rebase"
         required: false
         type: string
-        default: "squash"
+        default: "merge"
 
       # ──────────────────────────────────────────────────────
       # Notifications
@@ -119,62 +119,72 @@ jobs:
         with:
           fetch-depth: 0
           ref: ${{ inputs.source-branch }}
+          token: ${{ secrets.github-token }}
 
-      - name: Get commit information (exclude merge commits)
+      - name: Get commit information (only new commits not in target)
         id: commits
         shell: bash
         run: |
-          # Fetch target branch to get latest state
+          # Force fetch latest target branch state
           git fetch origin ${{ inputs.target-branch }} --depth=100
+          git fetch origin ${{ inputs.source-branch }} --depth=100
           
-          # Get merge-base (common ancestor) between source and target
-          MERGE_BASE=$(git merge-base origin/${{ inputs.target-branch }} HEAD)
+          # Get commits that are in source but NOT in target
+          # This correctly handles merge history and won't show old commits
+          COMMITS=$(git log origin/${{ inputs.target-branch }}..HEAD --oneline --no-merges)
+          COMMIT_COUNT=$(echo "$COMMITS" | grep -c '^' || echo "0")
           
-          # Get commits that are only in source branch (above merge-base)
-          # Exclude merge commits (--no-merges) to show only real commits
-          ALL_COMMITS=$(git log ${MERGE_BASE}..HEAD --oneline --no-merges)
-          COMMIT_COUNT=$(echo "$ALL_COMMITS" | grep -c '^' || echo "0")
+          # Also get full list including merges for reference
+          FULL_COMMITS=$(git log origin/${{ inputs.target-branch }}..HEAD --oneline)
+          TOTAL_COUNT=$(echo "$FULL_COMMITS" | grep -c '^' || echo "0")
           
           echo "count=$COMMIT_COUNT" >> $GITHUB_OUTPUT
           echo "list<<EOF" >> $GITHUB_OUTPUT
-          echo "$ALL_COMMITS" >> $GITHUB_OUTPUT
+          echo "$COMMITS" >> $GITHUB_OUTPUT
           echo "EOF" >> $GITHUB_OUTPUT
           
-          # Also store full commit list (including merges) for reference
-          FULL_COMMITS=$(git log ${MERGE_BASE}..HEAD --oneline)
           echo "full_list<<EOF" >> $GITHUB_OUTPUT
           echo "$FULL_COMMITS" >> $GITHUB_OUTPUT
           echo "EOF" >> $GITHUB_OUTPUT
           
-          # Latest commit info (from real commits, not merge)
-          LATEST_REAL_SHA=$(git log ${MERGE_BASE}..HEAD --no-merges -1 --pretty=%h || echo "none")
-          LATEST_REAL_MSG=$(git log ${MERGE_BASE}..HEAD --no-merges -1 --pretty=%s || echo "none")
-          LATEST_REAL_AUTHOR=$(git log ${MERGE_BASE}..HEAD --no-merges -1 --pretty=%an || echo "none")
+          echo "total_count=$TOTAL_COUNT" >> $GITHUB_OUTPUT
           
-          # If no real commits, fallback to latest overall
-          if [ "$LATEST_REAL_SHA" = "none" ]; then
-            LATEST_REAL_SHA=$(git rev-parse --short HEAD)
-            LATEST_REAL_MSG=$(git log -1 --pretty=%s)
-            LATEST_REAL_AUTHOR=$(git log -1 --pretty=%an)
+          # Latest commit info
+          if [ "$COMMIT_COUNT" -gt 0 ]; then
+            LATEST_SHA=$(git log origin/${{ inputs.target-branch }}..HEAD --no-merges -1 --pretty=%h)
+            LATEST_MSG=$(git log origin/${{ inputs.target-branch }}..HEAD --no-merges -1 --pretty=%s)
+            LATEST_AUTHOR=$(git log origin/${{ inputs.target-branch }}..HEAD --no-merges -1 --pretty=%an)
+          else
+            LATEST_SHA="none"
+            LATEST_MSG="none"
+            LATEST_AUTHOR="none"
           fi
           
-          echo "latest_sha=$LATEST_REAL_SHA" >> $GITHUB_OUTPUT
-          echo "latest_msg=$LATEST_REAL_MSG" >> $GITHUB_OUTPUT
-          echo "latest_author=$LATEST_REAL_AUTHOR" >> $GITHUB_OUTPUT
+          echo "latest_sha=$LATEST_SHA" >> $GITHUB_OUTPUT
+          echo "latest_msg=$LATEST_MSG" >> $GITHUB_OUTPUT
+          echo "latest_author=$LATEST_AUTHOR" >> $GITHUB_OUTPUT
           
-          # Also output total commits including merges for debugging
-          TOTAL_COMMITS=$(git log ${MERGE_BASE}..HEAD --oneline | grep -c '^' || echo "0")
-          echo "total_count=$TOTAL_COMMITS" >> $GITHUB_OUTPUT
+          echo "📊 Found $COMMIT_COUNT new commits (not in target branch)"
+          echo "📊 Total commits in range: $TOTAL_COUNT"
+
+      - name: Skip if no new commits
+        if: steps.commits.outputs.count == '0'
+        shell: bash
+        run: |
+          echo "ℹ️ No new commits to merge. Skipping PR creation/update."
+          echo "action=none" >> $GITHUB_OUTPUT
+          
+          echo "## PR Management Result" >> $GITHUB_STEP_SUMMARY
+          echo "- Action: Skipped (no new commits)" >> $GITHUB_STEP_SUMMARY
+          echo "- Source branch is already up to date with target" >> $GITHUB_STEP_SUMMARY
 
       - name: Check existing PR
         id: check
+        if: steps.commits.outputs.count != '0'
         shell: bash
         env:
           GH_TOKEN: ${{ secrets.github-token }}
         run: |
-          # Ensure target branch is up to date on remote
-          git fetch origin ${{ inputs.target-branch }} --depth=1
-          
           EXISTING_PR=$(gh pr list \
             --base ${{ inputs.target-branch }} \
             --head ${{ inputs.source-branch }} \
@@ -188,17 +198,20 @@ jobs:
             echo "exists=true" >> $GITHUB_OUTPUT
             echo "pr_number=$PR_NUMBER" >> $GITHUB_OUTPUT
             echo "pr_url=$PR_URL" >> $GITHUB_OUTPUT
+            echo "Found existing PR #$PR_NUMBER" >> $GITHUB_STEP_SUMMARY
           else
             echo "exists=false" >> $GITHUB_OUTPUT
+            echo "No existing PR found" >> $GITHUB_STEP_SUMMARY
           fi
 
       - name: Create or Update PR
         id: pr
+        if: steps.commits.outputs.count != '0'
         shell: bash
         env:
           GH_TOKEN: ${{ secrets.github-token }}
         run: |
-          # Build PR body with commit list (excluding merge commits)
+          # Build PR body with commit list (only new commits)
           PR_BODY=$(cat <<EOF
           ## 🚀 Deployment Request: ${{ inputs.project-name }}
           
@@ -231,12 +244,14 @@ jobs:
           EOF
           )
           
-          # Create title with real commit count (excluding merges)
+          # Create title with commit count
           PR_TITLE="[${{ inputs.project-name }}] ${{ inputs.source-branch }} → ${{ inputs.target-branch }} (${{ steps.commits.outputs.count }} commit(s))"
           
           if [ "${{ steps.check.outputs.exists }}" == "true" ]; then
             if [ "${{ inputs.auto-update-existing }}" == "true" ]; then
               # Update existing PR
+              echo "🔄 Updating existing PR #${{ steps.check.outputs.pr_number }}"
+              
               gh pr edit ${{ steps.check.outputs.pr_number }} \
                 --title "$PR_TITLE" \
                 --body "$PR_BODY"
@@ -245,16 +260,19 @@ jobs:
               echo "pr_number=${{ steps.check.outputs.pr_number }}" >> $GITHUB_OUTPUT
               echo "pr_url=${{ steps.check.outputs.pr_url }}" >> $GITHUB_OUTPUT
               
-              # Add comment about new commits (only if there are new real commits)
+              # Add comment about new commits
               if [ "${{ steps.commits.outputs.count }}" -gt 0 ]; then
                 gh pr comment ${{ steps.check.outputs.pr_number }} \
                   --body "📌 **อัพเดท**: มี commit ใหม่ ${{ steps.commits.outputs.count }} รายการ"
               fi
             else
               echo "action=none" >> $GITHUB_OUTPUT
+              echo "ℹ️ Auto-update is disabled, skipping PR update"
             fi
           else
             # Create new PR
+            echo "✨ Creating new PR"
+            
             PR_URL=$(gh pr create \
               --base ${{ inputs.target-branch }} \
               --head ${{ inputs.source-branch }} \
@@ -269,18 +287,25 @@ jobs:
             echo "action=created" >> $GITHUB_OUTPUT
             echo "pr_number=$PR_NUMBER" >> $GITHUB_OUTPUT
             echo "pr_url=$PR_URL" >> $GITHUB_OUTPUT
+            
+            echo "✅ PR created: $PR_URL"
           fi
 
       - name: Setup auto-merge (if enabled)
-        if: inputs.auto-merge == 'true' && steps.pr.outputs.action != 'none'
+        if: inputs.auto-merge == 'true' && steps.pr.outputs.action != 'none' && steps.pr.outputs.action != 'skipped'
         shell: bash
         env:
           GH_TOKEN: ${{ secrets.github-token }}
         run: |
+          echo "🔧 Setting up auto-merge with method: ${{ inputs.merge-method }}"
+          
+          # Enable auto-merge
           gh pr merge ${{ steps.pr.outputs.pr_number }} \
             --${{ inputs.merge-method }} \
             --auto \
             --subject "Auto-merge: ${{ steps.commits.outputs.latest_msg }}"
+          
+          echo "✅ Auto-merge enabled for PR #${{ steps.pr.outputs.pr_number }}"
 
       - name: Delete source branch on merge (if enabled)
         if: inputs.delete-on-merge == 'true'
@@ -288,11 +313,11 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.github-token }}
         run: |
-          # This will be handled by GitHub settings or we can add webhook
-          echo "Source branch deletion is enabled but will happen after merge"
+          echo "🗑️ Source branch deletion is enabled but will happen after merge"
+          echo "Note: GitHub can auto-delete branch after merge in repo settings"
 
       - name: Send notification (if enabled)
-        if: inputs.notify-on-pr-created == 'true' && steps.pr.outputs.action != 'none'
+        if: inputs.notify-on-pr-created == 'true' && steps.pr.outputs.action != 'none' && steps.pr.outputs.action != 'skipped'
         shell: bash
         run: |
           if [ -n "${{ inputs.notification-webhook }}" ]; then
@@ -311,13 +336,23 @@ jobs:
         id: pr-output
         shell: bash
         run: |
+          # Set outputs
           echo "pr_number=${{ steps.pr.outputs.pr_number }}" >> $GITHUB_OUTPUT
           echo "pr_url=${{ steps.pr.outputs.pr_url }}" >> $GITHUB_OUTPUT
           echo "action=${{ steps.pr.outputs.action }}" >> $GITHUB_OUTPUT
           
-          # Also output to step summary
-          echo "## PR Management Result" >> $GITHUB_STEP_SUMMARY
-          echo "- Action: ${{ steps.pr.outputs.action }}" >> $GITHUB_STEP_SUMMARY
-          echo "- Real commits: ${{ steps.commits.outputs.count }}" >> $GITHUB_STEP_SUMMARY
-          echo "- Total commits (including merges): ${{ steps.commits.outputs.total_count }}" >> $GITHUB_STEP_SUMMARY
-          echo "- PR: ${{ steps.pr.outputs.pr_url }}" >> $GITHUB_STEP_SUMMARY
+          # Create detailed step summary
+          cat >> $GITHUB_STEP_SUMMARY << 'EOF'
+          ## 📋 PR Management Result
+          
+          | รายการ | ผลลัพธ์ |
+          |--------|---------|
+          | **Action** | ${{ steps.pr.outputs.action }} |
+          | **New Commits** | ${{ steps.commits.outputs.count }} |
+          | **PR Number** | #${{ steps.pr.outputs.pr_number }} |
+          | **PR URL** | ${{ steps.pr.outputs.pr_url }} |
+          
+          ---
+          
+          ### 📝 Commits in this PR
+          
