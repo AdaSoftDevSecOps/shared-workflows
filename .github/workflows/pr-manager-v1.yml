@@ -60,31 +60,19 @@ on:
         default: "auto-pr,needs-review"
 
       # ──────────────────────────────────────────────────────
-      # Auto Merge Configuration ⭐ NEW ⭐
+      # Auto Merge (Optional)
       # ──────────────────────────────────────────────────────
-      auto-merge-on-approve:
-        description: "Auto merge when PR is approved (true/false) - Tester only needs Triage permission"
+      auto-merge:
+        description: "Auto merge when approved (true/false)"
         required: false
         type: string
-        default: "true"
+        default: "false"
 
       merge-method:
         description: "Merge method: merge, squash, rebase"
         required: false
         type: string
         default: "merge"
-
-      required-approvals:
-        description: "Number of required approvals before auto-merge"
-        required: false
-        type: number
-        default: 1
-
-      wait-for-ci:
-        description: "Wait for CI checks to pass before auto-merge (true/false)"
-        required: false
-        type: string
-        default: "false"
 
       # ──────────────────────────────────────────────────────
       # Notifications
@@ -101,12 +89,6 @@ on:
         type: string
         default: ""
 
-      notify-on-merge:
-        description: "Send notification when PR merged"
-        required: false
-        type: string
-        default: "true"
-
     secrets:
       github-token:
         description: "GitHub token for PR operations"
@@ -120,21 +102,17 @@ on:
         description: "PR URL"
         value: ${{ jobs.manage-pr.outputs.pr_url }}
       action:
-        description: "Action performed: created, updated, merged, none"
+        description: "Action performed: created, updated, none"
         value: ${{ jobs.manage-pr.outputs.action }}
-      merged:
-        description: "Whether PR was auto-merged"
-        value: ${{ jobs.manage-pr.outputs.merged }}
 
 jobs:
   manage-pr:
     name: "Manage PR: ${{ inputs.source-branch }} → ${{ inputs.target-branch }}"
     runs-on: ubuntu-latest
     outputs:
-      pr_number: ${{ steps.final-output.outputs.pr_number }}
-      pr_url: ${{ steps.final-output.outputs.pr_url }}
-      action: ${{ steps.final-output.outputs.action }}
-      merged: ${{ steps.final-output.outputs.merged }}
+      pr_number: ${{ steps.pr-output.outputs.pr_number }}
+      pr_url: ${{ steps.pr-output.outputs.pr_url }}
+      action: ${{ steps.pr-output.outputs.action }}
     
     steps:
       - uses: actions/checkout@v4
@@ -152,6 +130,7 @@ jobs:
           git fetch origin ${{ inputs.source-branch }} --depth=100
           
           # Get commits that are in source but NOT in target
+          # This correctly handles merge history and won't show old commits
           COMMITS=$(git log origin/${{ inputs.target-branch }}..HEAD --oneline --no-merges)
           COMMIT_COUNT=$(echo "$COMMITS" | grep -c '^' || echo "0")
           
@@ -194,10 +173,10 @@ jobs:
         run: |
           echo "ℹ️ No new commits to merge. Skipping PR creation/update."
           echo "action=none" >> $GITHUB_OUTPUT
-          echo "merged=false" >> $GITHUB_OUTPUT
           
           echo "## PR Management Result" >> $GITHUB_STEP_SUMMARY
           echo "- Action: Skipped (no new commits)" >> $GITHUB_STEP_SUMMARY
+          echo "- Source branch is already up to date with target" >> $GITHUB_STEP_SUMMARY
 
       - name: Check existing PR
         id: check
@@ -210,18 +189,16 @@ jobs:
             --base ${{ inputs.target-branch }} \
             --head ${{ inputs.source-branch }} \
             --state open \
-            --json number,url,title,mergeable,statusCheckRollup \
+            --json number,url,title \
             --jq '.[0]')
           
           if [ -n "$EXISTING_PR" ]; then
             PR_NUMBER=$(echo "$EXISTING_PR" | jq -r '.number')
             PR_URL=$(echo "$EXISTING_PR" | jq -r '.url')
-            MERGEABLE=$(echo "$EXISTING_PR" | jq -r '.mergeable')
             echo "exists=true" >> $GITHUB_OUTPUT
             echo "pr_number=$PR_NUMBER" >> $GITHUB_OUTPUT
             echo "pr_url=$PR_URL" >> $GITHUB_OUTPUT
-            echo "mergeable=$MERGEABLE" >> $GITHUB_OUTPUT
-            echo "Found existing PR #$PR_NUMBER (mergeable: $MERGEABLE)" >> $GITHUB_STEP_SUMMARY
+            echo "Found existing PR #$PR_NUMBER" >> $GITHUB_STEP_SUMMARY
           else
             echo "exists=false" >> $GITHUB_OUTPUT
             echo "No existing PR found" >> $GITHUB_STEP_SUMMARY
@@ -234,22 +211,7 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.github-token }}
         run: |
-          # Build PR body with commit list and auto-merge instructions
-          AUTO_MERGE_NOTE=""
-          if [ "${{ inputs.auto-merge-on-approve }}" == "true" ]; then
-            AUTO_MERGE_NOTE=$(cat <<EOF
-          
-          ---
-          
-          ### 🤖 Auto-Merge Enabled
-          
-          - เมื่อมี Approve ครบ ${{ inputs.required_approvals }} คน → จะ **merge อัตโนมัติ** ทันที
-          - Tester: แค่กด **Approve** ก็พอ ไม่ต้องกด merge เอง
-          - ⚠️ ${{ inputs.wait_for_ci == 'true' && 'รอ CI ทั้งหมดผ่านก่อน' || 'ไม่รอ CI (merge ทันทีเมื่อ approve)' }}
-          EOF
-          )
-          fi
-          
+          # Build PR body with commit list (only new commits)
           PR_BODY=$(cat <<EOF
           ## 🚀 Deployment Request: ${{ inputs.project-name }}
           
@@ -276,10 +238,9 @@ jobs:
           
           1. Review การเปลี่ยนแปลงข้างต้น
           2. Approve PR นี้
-          3. ${{ inputs.auto-merge-on-approve == 'true' && 'ระบบจะ auto-merge ให้ทันที' || 'Merge เพื่อ deploy ไปยัง target branch' }}
+          3. Merge เพื่อ deploy ไปยัง ${{ inputs.target-branch }}
           
           *🤖 PR นี้ถูกสร้าง/อัพเดทโดยอัตโนมัติ*
-          $AUTO_MERGE_NOTE
           EOF
           )
           
@@ -330,75 +291,21 @@ jobs:
             echo "✅ PR created: $PR_URL"
           fi
 
-      - name: Setup auto-merge (ใช้ GitHub Native Feature) ⭐
-        id: auto-merge-setup
-        if: inputs.auto-merge-on-approve == 'true' && steps.pr.outputs.action != 'none' && steps.pr.outputs.action != 'skipped'
+      - name: Setup auto-merge (if enabled)
+        if: inputs.auto-merge == 'true' && steps.pr.outputs.action != 'none' && steps.pr.outputs.action != 'skipped'
         shell: bash
         env:
           GH_TOKEN: ${{ secrets.github-token }}
         run: |
-          echo "🔧 Setting up GitHub native auto-merge"
-          echo "Method: ${{ inputs.merge-method }}"
-          echo "Required approvals: ${{ inputs.required-approvals }}"
-          echo "Wait for CI: ${{ inputs.wait-for-ci }}"
+          echo "🔧 Setting up auto-merge with method: ${{ inputs.merge-method }}"
           
-          # Enable native GitHub auto-merge
-          # This will automatically merge when all conditions are met:
-          # - Required number of approvals
-          # - CI checks (if wait-for-ci is true)
+          # Enable auto-merge
           gh pr merge ${{ steps.pr.outputs.pr_number }} \
             --${{ inputs.merge-method }} \
             --auto \
-            --subject "Auto-merge by PR Manager (approved)" \
-            --body "This PR will auto-merge when approved $([ '${{ inputs.wait-for-ci }}' = 'true' ] && echo 'and CI passes')"
+            --subject "Auto-merge: ${{ steps.commits.outputs.latest_msg }}"
           
-          echo "✅ GitHub native auto-merge enabled for PR #${{ steps.pr.outputs.pr_number }}"
-          
-          # Log status for debugging
-          echo "Auto-merge status:" >> $GITHUB_STEP_SUMMARY
-          echo "- Method: ${{ inputs.merge-method }}" >> $GITHUB_STEP_SUMMARY
-          echo "- Required approvals: ${{ inputs.required-approvals }}" >> $GITHUB_STEP_SUMMARY
-          echo "- Wait for CI: ${{ inputs.wait-for-ci }}" >> $GITHUB_STEP_SUMMARY
-          echo "- PR will merge automatically when approved ✅" >> $GITHUB_STEP_SUMMARY
-
-      - name: Check if PR is already approved and mergeable ⭐ NEW ⭐
-        id: check-approval
-        if: inputs.auto-merge-on-approve == 'true' && steps.pr.outputs.action != 'none' && steps.pr.outputs.action != 'skipped'
-        shell: bash
-        env:
-          GH_TOKEN: ${{ secrets.github-token }}
-        run: |
-          # Get PR reviews
-          REVIEWS=$(gh pr view ${{ steps.pr.outputs.pr_number }} --json reviews,reviewDecision)
-          REVIEW_DECISION=$(echo "$REVIEWS" | jq -r '.reviewDecision')
-          
-          # Count approved reviews
-          APPROVED_COUNT=$(echo "$REVIEWS" | jq '[.reviews[] | select(.state == "APPROVED")] | length')
-          
-          echo "Found $APPROVED_COUNT approvals (required: ${{ inputs.required-approvals }})"
-          echo "Review decision: $REVIEW_DECISION"
-          
-          if [ "$REVIEW_DECISION" == "APPROVED" ] || [ $APPROVED_COUNT -ge ${{ inputs.required-approvals }} ]; then
-            echo "✅ PR already has sufficient approvals!"
-            echo "already_approved=true" >> $GITHUB_OUTPUT
-            
-            # If CI wait is disabled or CI already passed, merge immediately
-            if [ "${{ inputs.wait-for-ci }}" == "false" ]; then
-              echo "⏭️ CI waiting disabled, attempting immediate merge..."
-              
-              # Try to merge now (GitHub will still check mergeability)
-               gh pr merge ${{ steps.pr.outputs.pr_number }} \
-                --${{ inputs.merge-method }} \
-                --auto 2>&1 || echo "Already in auto-merge queue"
-                
-              echo "✅ Auto-merge confirmed for PR #${{ steps.pr.outputs.pr_number }}"
-            else
-              echo "⏳ Waiting for CI checks to pass before auto-merge"
-            fi
-          else
-            echo "already_approved=false" >> $GITHUB_OUTPUT
-            echo "⏳ Waiting for ${{ inputs.required-approvals }} approvals (currently $APPROVED_COUNT)"
-          fi
+          echo "✅ Auto-merge enabled for PR #${{ steps.pr.outputs.pr_number }}"
 
       - name: Delete source branch on merge (if enabled)
         if: inputs.delete-on-merge == 'true'
@@ -406,41 +313,36 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.github-token }}
         run: |
-          echo "🗑️ Source branch deletion is enabled"
+          echo "🗑️ Source branch deletion is enabled but will happen after merge"
           echo "Note: GitHub can auto-delete branch after merge in repo settings"
-          echo "Or you can enable 'Automatically delete head branches' in repo settings"
 
-      - name: Send notification (PR created/updated)
+      - name: Send notification (if enabled)
         if: inputs.notify-on-pr-created == 'true' && steps.pr.outputs.action != 'none' && steps.pr.outputs.action != 'skipped'
         shell: bash
         run: |
           if [ -n "${{ inputs.notification-webhook }}" ]; then
-            AUTO_STATUS="${{ inputs.auto-merge-on-approve == 'true' && '✅ Auto-merge will trigger on approve' || '❌ Manual merge required' }}"
-            
             curl -X POST "${{ inputs.notification-webhook }}" \
               -H "Content-Type: application/json" \
-              -d "{
-                \"text\": \"📋 PR ${{ steps.pr.outputs.action }}: ${{ steps.pr.outputs.pr_url }}\n${AUTO_STATUS}\",
-                \"project\": \"${{ inputs.project-name }}\",
-                \"commits\": ${{ steps.commits.outputs.count }},
-                \"source\": \"${{ inputs.source-branch }}\",
-                \"target\": \"${{ inputs.target-branch }}\",
-                \"auto_merge\": ${{ inputs.auto-merge-on-approve == 'true' }}
-              }" || true
+              -d '{
+                "text": "📋 PR ${{ steps.pr.outputs.action }}: ${{ steps.pr.outputs.pr_url }}",
+                "project": "${{ inputs.project-name }}",
+                "commits": ${{ steps.commits.outputs.count }},
+                "source": "${{ inputs.source-branch }}",
+                "target": "${{ inputs.target-branch }}"
+              }' || true
           fi
 
-      - name: Output final results
-        id: final-output
+      - name: Output PR info
+        id: pr-output
         shell: bash
         run: |
           # Set outputs
           echo "pr_number=${{ steps.pr.outputs.pr_number }}" >> $GITHUB_OUTPUT
           echo "pr_url=${{ steps.pr.outputs.pr_url }}" >> $GITHUB_OUTPUT
           echo "action=${{ steps.pr.outputs.action }}" >> $GITHUB_OUTPUT
-          echo "merged=${{ steps.check-approval.outputs.auto_merged == 'true' || 'false' }}" >> $GITHUB_OUTPUT
           
           # Create detailed step summary
-          cat >> $GITHUB_STEP_SUMMARY << EOF
+          cat >> $GITHUB_STEP_SUMMARY << 'EOF'
           ## 📋 PR Management Result
           
           | รายการ | ผลลัพธ์ |
@@ -449,24 +351,8 @@ jobs:
           | **New Commits** | ${{ steps.commits.outputs.count }} |
           | **PR Number** | #${{ steps.pr.outputs.pr_number }} |
           | **PR URL** | ${{ steps.pr.outputs.pr_url }} |
-          | **Auto-Merge** | ${{ inputs.auto-merge-on-approve && '✅ Enabled' || '❌ Disabled' }} |
-          | **Merge Method** | ${{ inputs.merge-method }} |
           
           ---
           
-          ### 🤖 Auto-Merge Status
-          
-          ${{ inputs.auto-merge-on-approve == 'true' && '
-          - เมื่อมี Approve → PR จะ merge **อัตโนมัติ** ทันที
-          - Tester: ไม่ต้องกด merge แค่ Approve ก็พอ
-          - Tester ใช้สิทธิ์ **Triage** ได้ (ไม่ต้องมี Write)
-          ' || '
-          - Auto-merge disabled (ต้อง merge แบบ manual)
-          ' }}
-          
           ### 📝 Commits in this PR
           
-          \`\`\`
-          ${{ steps.commits.outputs.list }}
-          \`\`\`
-          EOF
