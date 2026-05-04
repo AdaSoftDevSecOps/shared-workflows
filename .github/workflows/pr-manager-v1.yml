@@ -246,7 +246,7 @@ jobs:
             echo "exists=false" >> $GITHUB_OUTPUT
             echo "No existing PR found" >> $GITHUB_STEP_SUMMARY
           fi
-
+          
       - name: Create or Update PR
         id: pr
         if: steps.commits.outputs.count != '0'
@@ -255,14 +255,14 @@ jobs:
           GH_TOKEN: ${{ secrets.github-token }}
         run: |
           # Build PR body with commit list (only new commits)
-          PR_BODY=$(cat <<EOF
+          PR_BODY=$(cat <<'EOF'
           ## 🚀 Deployment Request: ${{ inputs.project-name }}
           
           | รายละเอียด | ข้อมูล |
           |-----------|--------|
           | **โปรเจค** | ${{ inputs.project-name }} |
-          | **ต้นทาง** | \`${{ inputs.source-branch }}\` |
-          | **ปลายทาง** | \`${{ inputs.target-branch }}\` |
+          | **ต้นทาง** | `${{ inputs.source-branch }}` |
+          | **ปลายทาง** | `${{ inputs.target-branch }}` |
           | **จำนวน commits** | ${{ steps.commits.outputs.count }} |
           | **Commit ล่าสุด** | ${{ steps.commits.outputs.latest_sha }} |
           | **ผู้พัฒนา** | ${{ steps.commits.outputs.latest_author }} |
@@ -271,42 +271,23 @@ jobs:
           ---
           
           ### 📝 รายการ commits:
-          
-          \`\`\`
-          ${{ steps.commits.outputs.list }}
-          \`\`\`
+          ${{ steps.commits.outputs.list }}   
           
           ---
-          
+
           ### ✅ ขั้นตอนการดำเนินการ:
-          
+
           1. Review การเปลี่ยนแปลงข้างต้น
           2. Approve PR นี้
           3. Merge เพื่อ deploy ไปยัง ${{ inputs.target-branch }}
-          
+
           *🤖 PR นี้ถูกสร้าง/อัพเดทโดยอัตโนมัติ*
           EOF
           )
-          
+
           # Create title with commit count
           PR_TITLE="[${{ inputs.project-name }}] ${{ inputs.source-branch }} → ${{ inputs.target-branch }} (${{ steps.commits.outputs.count }} commit(s))"
-          
-          # Build assignee and reviewer arguments
-          ASSIGNEE_ARGS=""
-          if [ -n "${{ steps.assignees.outputs.assignees }}" ]; then
-            ASSIGNEE_ARGS="--assignee \"${{ steps.assignees.outputs.assignees }}\""
-          fi
-          
-          REVIEWER_ARGS=""
-          if [ -n "${{ inputs.reviewers }}" ]; then
-            REVIEWER_ARGS="--reviewer \"${{ inputs.reviewers }}\""
-          fi
-          
-          LABEL_ARGS=""
-          if [ -n "${{ inputs.labels }}" ]; then
-            LABEL_ARGS="--label \"${{ inputs.labels }}\""
-          fi
-          
+
           if [ "${{ steps.check.outputs.exists }}" == "true" ]; then
             if [ "${{ inputs.auto-update-existing }}" == "true" ]; then
               # Update existing PR
@@ -337,41 +318,184 @@ jobs:
               echo "ℹ️ Auto-update is disabled, skipping PR update"
             fi
           else
-            # Create new PR
+            # Create new PR - แก้ไขใหม่ไม่ใช้ eval
             echo "✨ Creating new PR"
             
-            # Build gh pr create command with optional arguments
-            CREATE_CMD="gh pr create \
-              --base ${{ inputs.target-branch }} \
-              --head ${{ inputs.source-branch }} \
-              --title \"$PR_TITLE\" \
-              --body \"$PR_BODY\""
+            # สร้าง array ของ arguments สำหรับ gh pr create
+            PR_ARGS=(
+              --base "${{ inputs.target-branch }}"
+              --head "${{ inputs.source-branch }}"
+              --title "$PR_TITLE"
+              --body "$PR_BODY"
+            )
             
-            if [ -n "$ASSIGNEE_ARGS" ]; then
-              CREATE_CMD="$CREATE_CMD $ASSIGNEE_ARGS"
+            # เพิ่ม assignee ถ้ามี
+            if [ -n "${{ steps.assignees.outputs.assignees }}" ]; then
+              PR_ARGS+=(--assignee "${{ steps.assignees.outputs.assignees }}")
             fi
             
-            if [ -n "$REVIEWER_ARGS" ]; then
-              CREATE_CMD="$CREATE_CMD $REVIEWER_ARGS"
+            # เพิ่ม reviewer ถ้ามี
+            if [ -n "${{ inputs.reviewers }}" ]; then
+              PR_ARGS+=(--reviewer "${{ inputs.reviewers }}")
             fi
             
-            if [ -n "$LABEL_ARGS" ]; then
-              CREATE_CMD="$CREATE_CMD $LABEL_ARGS"
+            # เพิ่ม label ถ้ามี
+            if [ -n "${{ inputs.labels }}" ]; then
+              PR_ARGS+=(--label "${{ inputs.labels }}")
             fi
             
-            # Execute the command
-            eval "$CREATE_CMD" > pr_url.txt 2>&1
-            PR_URL=$(cat pr_url.txt)
+            # Execute gh pr create with proper arguments
+            PR_URL=$(gh pr create "${PR_ARGS[@]}" 2>&1)
+            CREATE_EXIT_CODE=$?
+            
+            if [ $CREATE_EXIT_CODE -ne 0 ]; then
+              echo "❌ Failed to create PR"
+              echo "Error: $PR_URL"
+              exit 1
+            fi
             
             # Extract PR number from URL
-            PR_NUMBER=$(echo "$PR_URL" | grep -oP '(?<=pull/)\d+')
+            # gh pr create returns URL in format: https://github.com/owner/repo/pull/NUMBER
+            PR_NUMBER=$(echo "$PR_URL" | grep -oP 'https://github\.com/[^/]+/[^/]+/pull/\K\d+')
+            
+            if [ -z "$PR_NUMBER" ]; then
+              echo "❌ Could not extract PR number from URL: $PR_URL"
+              exit 1
+            fi
             
             echo "action=created" >> $GITHUB_OUTPUT
             echo "pr_number=$PR_NUMBER" >> $GITHUB_OUTPUT
             echo "pr_url=$PR_URL" >> $GITHUB_OUTPUT
             
             echo "✅ PR created: $PR_URL"
+            echo "✅ PR number: $PR_NUMBER"
           fi
+
+      ; - name: Create or Update PR
+      ;   id: pr
+      ;   if: steps.commits.outputs.count != '0'
+      ;   shell: bash
+      ;   env:
+      ;     GH_TOKEN: ${{ secrets.github-token }}
+      ;   run: |
+      ;     # Build PR body with commit list (only new commits)
+      ;     PR_BODY=$(cat <<EOF
+      ;     ## 🚀 Deployment Request: ${{ inputs.project-name }}
+          
+      ;     | รายละเอียด | ข้อมูล |
+      ;     |-----------|--------|
+      ;     | **โปรเจค** | ${{ inputs.project-name }} |
+      ;     | **ต้นทาง** | \`${{ inputs.source-branch }}\` |
+      ;     | **ปลายทาง** | \`${{ inputs.target-branch }}\` |
+      ;     | **จำนวน commits** | ${{ steps.commits.outputs.count }} |
+      ;     | **Commit ล่าสุด** | ${{ steps.commits.outputs.latest_sha }} |
+      ;     | **ผู้พัฒนา** | ${{ steps.commits.outputs.latest_author }} |
+      ;     | **ผู้รับผิดชอบ** | ${{ steps.assignees.outputs.assignees }} |
+          
+      ;     ---
+          
+      ;     ### 📝 รายการ commits:
+          
+      ;     \`\`\`
+      ;     ${{ steps.commits.outputs.list }}
+      ;     \`\`\`
+          
+      ;     ---
+          
+      ;     ### ✅ ขั้นตอนการดำเนินการ:
+          
+      ;     1. Review การเปลี่ยนแปลงข้างต้น
+      ;     2. Approve PR นี้
+      ;     3. Merge เพื่อ deploy ไปยัง ${{ inputs.target-branch }}
+          
+      ;     *🤖 PR นี้ถูกสร้าง/อัพเดทโดยอัตโนมัติ*
+      ;     EOF
+      ;     )
+          
+      ;     # Create title with commit count
+      ;     PR_TITLE="[${{ inputs.project-name }}] ${{ inputs.source-branch }} → ${{ inputs.target-branch }} (${{ steps.commits.outputs.count }} commit(s))"
+          
+      ;     # Build assignee and reviewer arguments
+      ;     ASSIGNEE_ARGS=""
+      ;     if [ -n "${{ steps.assignees.outputs.assignees }}" ]; then
+      ;       ASSIGNEE_ARGS="--assignee \"${{ steps.assignees.outputs.assignees }}\""
+      ;     fi
+          
+      ;     REVIEWER_ARGS=""
+      ;     if [ -n "${{ inputs.reviewers }}" ]; then
+      ;       REVIEWER_ARGS="--reviewer \"${{ inputs.reviewers }}\""
+      ;     fi
+          
+      ;     LABEL_ARGS=""
+      ;     if [ -n "${{ inputs.labels }}" ]; then
+      ;       LABEL_ARGS="--label \"${{ inputs.labels }}\""
+      ;     fi
+          
+      ;     if [ "${{ steps.check.outputs.exists }}" == "true" ]; then
+      ;       if [ "${{ inputs.auto-update-existing }}" == "true" ]; then
+      ;         # Update existing PR
+      ;         echo "🔄 Updating existing PR #${{ steps.check.outputs.pr_number }}"
+              
+      ;         gh pr edit ${{ steps.check.outputs.pr_number }} \
+      ;           --title "$PR_TITLE" \
+      ;           --body "$PR_BODY"
+              
+      ;         # Update assignees if auto-detect is enabled
+      ;         if [ -z "${{ inputs.assignees }}" ] && [ -n "${{ steps.assignees.outputs.assignees }}" ]; then
+      ;           echo "👤 Updating assignee to ${{ steps.assignees.outputs.assignees }}"
+      ;           gh pr edit ${{ steps.check.outputs.pr_number }} \
+      ;             --add-assignee "${{ steps.assignees.outputs.assignees }}"
+      ;         fi
+              
+      ;         echo "action=updated" >> $GITHUB_OUTPUT
+      ;         echo "pr_number=${{ steps.check.outputs.pr_number }}" >> $GITHUB_OUTPUT
+      ;         echo "pr_url=${{ steps.check.outputs.pr_url }}" >> $GITHUB_OUTPUT
+              
+      ;         # Add comment about new commits
+      ;         if [ "${{ steps.commits.outputs.count }}" -gt 0 ]; then
+      ;           gh pr comment ${{ steps.check.outputs.pr_number }} \
+      ;             --body "📌 **อัพเดท**: มี commit ใหม่ ${{ steps.commits.outputs.count }} รายการ"
+      ;         fi
+      ;       else
+      ;         echo "action=none" >> $GITHUB_OUTPUT
+      ;         echo "ℹ️ Auto-update is disabled, skipping PR update"
+      ;       fi
+      ;     else
+      ;       # Create new PR
+      ;       echo "✨ Creating new PR"
+            
+      ;       # Build gh pr create command with optional arguments
+      ;       CREATE_CMD="gh pr create \
+      ;         --base ${{ inputs.target-branch }} \
+      ;         --head ${{ inputs.source-branch }} \
+      ;         --title \"$PR_TITLE\" \
+      ;         --body \"$PR_BODY\""
+            
+      ;       if [ -n "$ASSIGNEE_ARGS" ]; then
+      ;         CREATE_CMD="$CREATE_CMD $ASSIGNEE_ARGS"
+      ;       fi
+            
+      ;       if [ -n "$REVIEWER_ARGS" ]; then
+      ;         CREATE_CMD="$CREATE_CMD $REVIEWER_ARGS"
+      ;       fi
+            
+      ;       if [ -n "$LABEL_ARGS" ]; then
+      ;         CREATE_CMD="$CREATE_CMD $LABEL_ARGS"
+      ;       fi
+            
+      ;       # Execute the command
+      ;       eval "$CREATE_CMD" > pr_url.txt 2>&1
+      ;       PR_URL=$(cat pr_url.txt)
+            
+      ;       # Extract PR number from URL
+      ;       PR_NUMBER=$(echo "$PR_URL" | grep -oP '(?<=pull/)\d+')
+            
+      ;       echo "action=created" >> $GITHUB_OUTPUT
+      ;       echo "pr_number=$PR_NUMBER" >> $GITHUB_OUTPUT
+      ;       echo "pr_url=$PR_URL" >> $GITHUB_OUTPUT
+            
+      ;       echo "✅ PR created: $PR_URL"
+      ;     fi
 
       - name: Send notification (if enabled)
         if: inputs.notify-on-pr-created == 'true' && steps.pr.outputs.action != 'none'
