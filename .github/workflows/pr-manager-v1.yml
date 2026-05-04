@@ -77,6 +77,12 @@ on:
         type: string
         default: ""
 
+      sql-scripts-info:
+        description: "ข้อมูล SQL scripts ที่จะรัน (ถ้ามี)"
+        required: false
+        type: string
+        default: ""
+
     secrets:
       github-token:
         description: "GitHub token for PR operations"
@@ -267,6 +273,7 @@ jobs:
           | **Commit ล่าสุด** | ${{ steps.commits.outputs.latest_sha }} |
           | **ผู้พัฒนา** | ${{ steps.commits.outputs.latest_author }} |
           | **ผู้รับผิดชอบ** | ${{ steps.assignees.outputs.assignees }} |
+          | **SQL Scripts** | ${{ inputs.sql-scripts-info || 'ไม่มีการเปลี่ยนแปลง' }} |
           
           ---
           

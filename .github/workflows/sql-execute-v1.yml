@@ -24,6 +24,18 @@ on:
       runner_label:
         required: true
         type: string
+      ref:
+        required: false
+        type: string
+        default: ''
+
+    outputs:
+      has_changes:
+        description: "True if SQL scripts have changes"
+        value: ${{ jobs.execute-sql.outputs.has_changes }}
+      script_summary:
+        description: "Summary of scripts found"
+        value: ${{ jobs.execute-sql.outputs.script_summary }}
 
     secrets:
       SQL_HOST: { required: true }
@@ -36,6 +48,9 @@ jobs:
   execute-sql:
     name: "${{ inputs.project_name }} → ${{ inputs.db_name }}"
     runs-on: [self-hosted, windows, "${{ inputs.runner_label }}"]
+    outputs:
+      has_changes: ${{ steps.filter.outputs.sql }}
+      script_summary: ${{ steps.validate.outputs.script_summary }}
 
     concurrency:
       group: sql-deploy-${{ inputs.runner_label }}-${{ inputs.db_name }}
@@ -47,13 +62,24 @@ jobs:
       # =====================================================
       - uses: actions/checkout@v4
         with:
-          fetch-depth: 1
+          repository: 'AdaSoftDevSecOps/AdaScriptCenter'
+          ref: ${{ inputs.ref }}
+          fetch-depth: 2
+
+      - name: Check for changes
+        id: filter
+        uses: dorny/paths-filter@v3
+        with:
+          filters: |
+            sql:
+              - 'Script-StoreBack-*.sql'
 
       - name: DEBUG List files
         shell: powershell
         run: |
           Write-Host "PWD: $(Get-Location)"
           Get-ChildItem -Recurse | Select-Object FullName
+          Write-Host "Has changes: ${{ steps.filter.outputs.sql }}"
 
       # =====================================================
       # 2. Validate scripts
@@ -98,6 +124,9 @@ jobs:
 
           echo "has_scripts=true" >> $env:GITHUB_OUTPUT
           echo "script_count=$($foundList.Count)" >> $env:GITHUB_OUTPUT
+          
+          $summary = "Found $($foundList.Count) scripts: " + (($scripts | ForEach-Object { $_ }) -join ", ")
+          echo "script_summary=$summary" >> $env:GITHUB_OUTPUT
 
           $jsonItems = $foundList | ForEach-Object { '"' + ($_ -replace '\\', '\\') + '"' }
           $json = '[' + ($jsonItems -join ',') + ']'
@@ -109,7 +138,7 @@ jobs:
       # 3. Verify connection
       # =====================================================
       - name: Verify SQL Server connection
-        if: steps.validate.outputs.has_scripts == 'true'
+        if: steps.validate.outputs.has_scripts == 'true' && (steps.filter.outputs.sql == 'true' || github.event_name == 'push')
         shell: powershell
         env:
           SQL_HOST: ${{ secrets.SQL_HOST }}
@@ -184,7 +213,7 @@ jobs:
       # 5. Execute scripts
       # =====================================================
       - name: Execute scripts
-        if: steps.validate.outputs.has_scripts == 'true'
+        if: steps.validate.outputs.has_scripts == 'true' && (steps.filter.outputs.sql == 'true' || github.event_name == 'push')
         id: execute
         shell: powershell
         env:
