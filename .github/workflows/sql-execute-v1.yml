@@ -43,6 +43,7 @@ on:
       SQL_USER: { required: true }
       SQL_PASSWORD: { required: true }
       SQL_BACKUP_PATH: { required: true }
+      GH_TOKEN: { required: false }
 
 jobs:
   execute-sql:
@@ -64,6 +65,7 @@ jobs:
         with:
           repository: 'AdaSoftDevSecOps/AdaScriptCenter'
           ref: ${{ inputs.ref }}
+          token: ${{ secrets.GH_TOKEN || github.token }}
           fetch-depth: 2
 
       - name: Check for changes
