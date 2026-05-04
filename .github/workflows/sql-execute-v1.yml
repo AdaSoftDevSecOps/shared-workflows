@@ -70,11 +70,29 @@ jobs:
 
       - name: Check for changes
         id: filter
-        uses: dorny/paths-filter@v3
-        with:
-          filters: |
-            sql:
-              - 'Script-StoreBack-*.sql'
+        shell: powershell
+        run: |
+          Write-Host "Checking for changes between HEAD^ and HEAD..."
+          $hasSql = "false"
+          
+          # ตรวจสอบว่ามี commit ก่อนหน้าไหม (ป้องกัน error กรณี repo ใหม่ซิง)
+          $commitCount = git rev-list --count HEAD
+          if ($commitCount -gt 1) {
+            $diff = git diff --name-only HEAD^ HEAD
+            Write-Host "Changed files: $diff"
+            foreach ($file in $diff) {
+              if ($file -like "Script-StoreBack-*.sql") {
+                $hasSql = "true"
+                break
+              }
+            }
+          } else {
+            Write-Host "First commit detected, assuming changes exist."
+            $hasSql = "true"
+          }
+          
+          echo "sql=$hasSql" >> $env:GITHUB_OUTPUT
+          Write-Host "Result: sql=$hasSql"
 
       - name: DEBUG List files
         shell: powershell
