@@ -36,7 +36,7 @@ on:
       # Assignees & Reviewers
       # ──────────────────────────────────────────────────────
       assignees:
-        description: "GitHub users to assign (comma separated)"
+        description: "GitHub users to assign (comma separated). Leave empty to auto-assign from first commit author"
         required: false
         type: string
         default: ""
@@ -142,18 +142,73 @@ jobs:
             LATEST_SHA=$(git log origin/${{ inputs.target-branch }}..HEAD --no-merges -1 --pretty=%h)
             LATEST_MSG=$(git log origin/${{ inputs.target-branch }}..HEAD --no-merges -1 --pretty=%s)
             LATEST_AUTHOR=$(git log origin/${{ inputs.target-branch }}..HEAD --no-merges -1 --pretty=%an)
+            
+            # Get the FIRST commit's author (oldest new commit) for auto-assign
+            FIRST_AUTHOR_NAME=$(git log origin/${{ inputs.target-branch }}..HEAD --no-merges --reverse -1 --pretty=%an)
+            FIRST_AUTHOR_EMAIL=$(git log origin/${{ inputs.target-branch }}..HEAD --no-merges --reverse -1 --pretty=%ae)
+            FIRST_AUTHOR_USERNAME=$(git log origin/${{ inputs.target-branch }}..HEAD --no-merges --reverse -1 --pretty=%an | tr '[:upper:]' '[:lower:]' | sed 's/[^a-z0-9-]/-/g')
           else
             LATEST_SHA="none"
             LATEST_MSG="none"
             LATEST_AUTHOR="none"
+            FIRST_AUTHOR_NAME="none"
+            FIRST_AUTHOR_EMAIL="none"
+            FIRST_AUTHOR_USERNAME="none"
           fi
           
           echo "latest_sha=$LATEST_SHA" >> $GITHUB_OUTPUT
           echo "latest_msg=$LATEST_MSG" >> $GITHUB_OUTPUT
           echo "latest_author=$LATEST_AUTHOR" >> $GITHUB_OUTPUT
+          echo "first_author_name=$FIRST_AUTHOR_NAME" >> $GITHUB_OUTPUT
+          echo "first_author_email=$FIRST_AUTHOR_EMAIL" >> $GITHUB_OUTPUT
+          echo "first_author_username=$FIRST_AUTHOR_USERNAME" >> $GITHUB_OUTPUT
           
           echo "📊 Found $COMMIT_COUNT new commits (not in target branch)"
           echo "📊 Total commits in range: $TOTAL_COUNT"
+          echo "👤 First commit author: $FIRST_AUTHOR_NAME"
+
+      - name: Resolve assignees (auto-detect if empty)
+        id: assignees
+        if: steps.commits.outputs.count != '0'
+        shell: bash
+        run: |
+          if [ -n "${{ inputs.assignees }}" ]; then
+            # Use specified assignees
+            ASSIGNEES="${{ inputs.assignees }}"
+            echo "method=manual" >> $GITHUB_OUTPUT
+          else
+            # Try to find GitHub username from commit author info
+            FIRST_AUTHOR_NAME="${{ steps.commits.outputs.first_author_name }}"
+            FIRST_AUTHOR_EMAIL="${{ steps.commits.outputs.first_author_email }}"
+            
+            echo "🔍 Auto-detecting assignee from first commit..."
+            echo "👤 Author name: $FIRST_AUTHOR_NAME"
+            echo "📧 Author email: $FIRST_AUTHOR_EMAIL"
+            
+            # Try to find GitHub username by searching commits
+            # Look for the most recent commits by this author to find their GitHub username
+            AUTHOR_USERNAME=$(git log --all --author="$FIRST_AUTHOR_EMAIL" --pretty="%an <%ae>" -1 2>/dev/null || echo "")
+            
+            # Alternative: try to extract from email (if it's a GitHub noreply email)
+            if [[ "$FIRST_AUTHOR_EMAIL" =~ ^([0-9]+\+)?([^@]+)@users\.noreply\.github\.com$ ]]; then
+              ASSIGNEES="${BASH_REMATCH[2]}"
+              echo "method=email_parsed" >> $GITHUB_OUTPUT
+            else
+              # Use the author name as a potential GitHub username
+              # Convert to lowercase and special handling
+              ASSIGNEES="$FIRST_AUTHOR_NAME"
+              echo "method=name_based" >> $GITHUB_OUTPUT
+            fi
+            
+            echo "🎯 Auto-assigned: $ASSIGNEES"
+          fi
+          
+          echo "assignees=$ASSIGNEES" >> $GITHUB_OUTPUT
+          
+          # Log assignment info
+          echo "## 👤 Assignee Resolution" >> $GITHUB_STEP_SUMMARY
+          echo "- **Method**: ${{ steps.assignees.outputs.method || 'manual' }}" >> $GITHUB_STEP_SUMMARY
+          echo "- **Assignees**: \`$ASSIGNEES\`" >> $GITHUB_STEP_SUMMARY
 
       - name: Skip if no new commits
         if: steps.commits.outputs.count == '0'
@@ -211,6 +266,7 @@ jobs:
           | **จำนวน commits** | ${{ steps.commits.outputs.count }} |
           | **Commit ล่าสุด** | ${{ steps.commits.outputs.latest_sha }} |
           | **ผู้พัฒนา** | ${{ steps.commits.outputs.latest_author }} |
+          | **ผู้รับผิดชอบ** | ${{ steps.assignees.outputs.assignees }} |
           
           ---
           
@@ -235,6 +291,22 @@ jobs:
           # Create title with commit count
           PR_TITLE="[${{ inputs.project-name }}] ${{ inputs.source-branch }} → ${{ inputs.target-branch }} (${{ steps.commits.outputs.count }} commit(s))"
           
+          # Build assignee and reviewer arguments
+          ASSIGNEE_ARGS=""
+          if [ -n "${{ steps.assignees.outputs.assignees }}" ]; then
+            ASSIGNEE_ARGS="--assignee \"${{ steps.assignees.outputs.assignees }}\""
+          fi
+          
+          REVIEWER_ARGS=""
+          if [ -n "${{ inputs.reviewers }}" ]; then
+            REVIEWER_ARGS="--reviewer \"${{ inputs.reviewers }}\""
+          fi
+          
+          LABEL_ARGS=""
+          if [ -n "${{ inputs.labels }}" ]; then
+            LABEL_ARGS="--label \"${{ inputs.labels }}\""
+          fi
+          
           if [ "${{ steps.check.outputs.exists }}" == "true" ]; then
             if [ "${{ inputs.auto-update-existing }}" == "true" ]; then
               # Update existing PR
@@ -243,6 +315,13 @@ jobs:
               gh pr edit ${{ steps.check.outputs.pr_number }} \
                 --title "$PR_TITLE" \
                 --body "$PR_BODY"
+              
+              # Update assignees if auto-detect is enabled
+              if [ -z "${{ inputs.assignees }}" ] && [ -n "${{ steps.assignees.outputs.assignees }}" ]; then
+                echo "👤 Updating assignee to ${{ steps.assignees.outputs.assignees }}"
+                gh pr edit ${{ steps.check.outputs.pr_number }} \
+                  --add-assignee "${{ steps.assignees.outputs.assignees }}"
+              fi
               
               echo "action=updated" >> $GITHUB_OUTPUT
               echo "pr_number=${{ steps.check.outputs.pr_number }}" >> $GITHUB_OUTPUT
@@ -261,15 +340,30 @@ jobs:
             # Create new PR
             echo "✨ Creating new PR"
             
-            PR_URL=$(gh pr create \
+            # Build gh pr create command with optional arguments
+            CREATE_CMD="gh pr create \
               --base ${{ inputs.target-branch }} \
               --head ${{ inputs.source-branch }} \
-              --title "$PR_TITLE" \
-              --body "$PR_BODY" \
-              ${{ inputs.assignees != '' && format('--assignee "{0}"', inputs.assignees) || '' }} \
-              ${{ inputs.reviewers != '' && format('--reviewer "{0}"', inputs.reviewers) || '' }} \
-              ${{ inputs.labels != '' && format('--label "{0}"', inputs.labels) || '' }})
+              --title \"$PR_TITLE\" \
+              --body \"$PR_BODY\""
             
+            if [ -n "$ASSIGNEE_ARGS" ]; then
+              CREATE_CMD="$CREATE_CMD $ASSIGNEE_ARGS"
+            fi
+            
+            if [ -n "$REVIEWER_ARGS" ]; then
+              CREATE_CMD="$CREATE_CMD $REVIEWER_ARGS"
+            fi
+            
+            if [ -n "$LABEL_ARGS" ]; then
+              CREATE_CMD="$CREATE_CMD $LABEL_ARGS"
+            fi
+            
+            # Execute the command
+            eval "$CREATE_CMD" > pr_url.txt 2>&1
+            PR_URL=$(cat pr_url.txt)
+            
+            # Extract PR number from URL
             PR_NUMBER=$(echo "$PR_URL" | grep -oP '(?<=pull/)\d+')
             
             echo "action=created" >> $GITHUB_OUTPUT
@@ -280,7 +374,7 @@ jobs:
           fi
 
       - name: Send notification (if enabled)
-        if: inputs.notify-on-pr-created == 'true' && steps.pr.outputs.action != 'none' && steps.pr.outputs.action != 'skipped'
+        if: inputs.notify-on-pr-created == 'true' && steps.pr.outputs.action != 'none'
         shell: bash
         run: |
           if [ -n "${{ inputs.notification-webhook }}" ]; then
@@ -291,7 +385,8 @@ jobs:
                 "project": "${{ inputs.project-name }}",
                 "commits": ${{ steps.commits.outputs.count }},
                 "source": "${{ inputs.source-branch }}",
-                "target": "${{ inputs.target-branch }}"
+                "target": "${{ inputs.target-branch }}",
+                "assignee": "${{ steps.assignees.outputs.assignees }}"
               }' || true
           fi
 
@@ -314,8 +409,25 @@ jobs:
           | **New Commits** | ${{ steps.commits.outputs.count }} |
           | **PR Number** | #${{ steps.pr.outputs.pr_number }} |
           | **PR URL** | ${{ steps.pr.outputs.pr_url }} |
+          | **Assignee** | ${{ steps.assignees.outputs.assignees }} |
+          | **Assignee Method** | ${{ steps.assignees.outputs.method || 'manual' }} |
           
           ---
           
           ### 📝 Commits in this PR
           
+          \`\`\`
+          ${{ steps.commits.outputs.list }}
+          \`\`\`
+          
+          ---
+          
+          ### 👤 Auto-Assignment Logic:
+          
+          - **First commit author**: ${{ steps.commits.outputs.first_author_name }}
+          - **Author email**: ${{ steps.commits.outputs.first_author_email }}
+          - **Resolved username**: ${{ steps.assignees.outputs.assignees }}
+          - **Method used**: ${{ steps.assignees.outputs.method || 'manual' }}
+          
+          *🤖 Auto-assignment triggered because no manual assignees were specified*
+          EOF
