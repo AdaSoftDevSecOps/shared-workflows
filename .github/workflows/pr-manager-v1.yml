@@ -3,69 +3,85 @@ name: "[Reusable] PR Manager"
 on:
   workflow_call:
     inputs:
+      # ──────────────────────────────────────────────────────
+      # PR Configuration
+      # ──────────────────────────────────────────────────────
       project-name:
         description: "ชื่อโปรเจค (ใช้ใน title PR)"
         required: true
         type: string
+
       source-branch:
         description: "ต้นทาง branch (default: dev)"
         required: false
         type: string
         default: "dev"
+
       target-branch:
         description: "ปลายทาง branch (default: sit)"
         required: false
         type: string
         default: "sit"
+
+      # ──────────────────────────────────────────────────────
+      # PR Behavior
+      # ──────────────────────────────────────────────────────
       auto-update-existing:
         description: "Auto update existing PR (true/false)"
         required: false
         type: string
         default: "true"
-      delete-on-merge:
-        description: "ลบ source branch เมื่อ merge แล้ว (true/false)"
-        required: false
-        type: string
-        default: "false"
+
+      # ──────────────────────────────────────────────────────
+      # Assignees & Reviewers
+      # ──────────────────────────────────────────────────────
       assignees:
-        description: "GitHub users to assign (comma separated). ถ้าไม่ระบุจะใช้ first committer อัตโนมัติ"
+        description: "GitHub users to assign (comma separated)"
         required: false
         type: string
         default: ""
+
       reviewers:
-        description: "Required reviewers (comma separated). รองรับทั้ง user และ team (ไม่ต้องใส่ @)"
+        description: "Required reviewers (comma separated)"
         required: false
         type: string
         default: ""
+
       labels:
         description: "PR labels (comma separated)"
         required: false
         type: string
         default: "auto-pr,needs-review"
-      auto-merge:
-        description: "Auto merge when approved (true/false)"
-        required: false
-        type: string
-        default: "false"
+
+      # ──────────────────────────────────────────────────────
+      # Auto Merge (Optional)
+      # ──────────────────────────────────────────────────────
       merge-method:
         description: "Merge method: merge, squash, rebase"
         required: false
         type: string
         default: "merge"
+
+      # ──────────────────────────────────────────────────────
+      # Notifications
+      # ──────────────────────────────────────────────────────
       notify-on-pr-created:
         description: "Send notification when PR created"
         required: false
         type: string
         default: "false"
+
       notification-webhook:
         description: "Webhook URL for notifications (Slack/Teams/LINE)"
         required: false
         type: string
         default: ""
+
     secrets:
       github-token:
         description: "GitHub token for PR operations"
         required: true
+
     outputs:
       pr_number:
         description: "PR number created/updated"
@@ -76,43 +92,37 @@ on:
       action:
         description: "Action performed: created, updated, none"
         value: ${{ jobs.manage-pr.outputs.action }}
-      assignee:
-        description: "Assignee of the PR"
-        value: ${{ jobs.manage-pr.outputs.assignee }}
 
 jobs:
   manage-pr:
     name: "Manage PR: ${{ inputs.source-branch }} → ${{ inputs.target-branch }}"
     runs-on: ubuntu-latest
     outputs:
-      pr_number: ${{ steps.set-outputs.outputs.pr_number }}
-      pr_url: ${{ steps.set-outputs.outputs.pr_url }}
-      action: ${{ steps.set-outputs.outputs.action }}
-      assignee: ${{ steps.set-outputs.outputs.assignee }}
+      pr_number: ${{ steps.pr-output.outputs.pr_number }}
+      pr_url: ${{ steps.pr-output.outputs.pr_url }}
+      action: ${{ steps.pr-output.outputs.action }}
     
     steps:
-      # ──────────────────────────────────────────────────
-      # Step 1: Checkout
-      # ──────────────────────────────────────────────────
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
           ref: ${{ inputs.source-branch }}
           token: ${{ secrets.github-token }}
 
-      # ──────────────────────────────────────────────────
-      # Step 2: Get commit information
-      # ──────────────────────────────────────────────────
-      - name: Get commit information
+      - name: Get commit information (only new commits not in target)
         id: commits
         shell: bash
         run: |
+          # Force fetch latest target branch state
           git fetch origin ${{ inputs.target-branch }} --depth=100
           git fetch origin ${{ inputs.source-branch }} --depth=100
           
+          # Get commits that are in source but NOT in target
+          # This correctly handles merge history and won't show old commits
           COMMITS=$(git log origin/${{ inputs.target-branch }}..HEAD --oneline --no-merges)
           COMMIT_COUNT=$(echo "$COMMITS" | grep -c '^' || echo "0")
           
+          # Also get full list including merges for reference
           FULL_COMMITS=$(git log origin/${{ inputs.target-branch }}..HEAD --oneline)
           TOTAL_COUNT=$(echo "$FULL_COMMITS" | grep -c '^' || echo "0")
           
@@ -127,32 +137,35 @@ jobs:
           
           echo "total_count=$TOTAL_COUNT" >> $GITHUB_OUTPUT
           
-          AUTHORS=$(git log origin/${{ inputs.target-branch }}..HEAD --no-merges --format='%an' | sort -u | paste -sd ',' -)
-          echo "authors=$AUTHORS" >> $GITHUB_OUTPUT
-          
-          LATEST_SHA=$(git log origin/${{ inputs.target-branch }}..HEAD --no-merges -1 --pretty=%h 2>/dev/null || echo "none")
-          LATEST_MSG=$(git log origin/${{ inputs.target-branch }}..HEAD --no-merges -1 --pretty=%s 2>/dev/null || echo "none")
-          LATEST_AUTHOR=$(git log origin/${{ inputs.target-branch }}..HEAD --no-merges -1 --pretty=%an 2>/dev/null || echo "none")
+          # Latest commit info
+          if [ "$COMMIT_COUNT" -gt 0 ]; then
+            LATEST_SHA=$(git log origin/${{ inputs.target-branch }}..HEAD --no-merges -1 --pretty=%h)
+            LATEST_MSG=$(git log origin/${{ inputs.target-branch }}..HEAD --no-merges -1 --pretty=%s)
+            LATEST_AUTHOR=$(git log origin/${{ inputs.target-branch }}..HEAD --no-merges -1 --pretty=%an)
+          else
+            LATEST_SHA="none"
+            LATEST_MSG="none"
+            LATEST_AUTHOR="none"
+          fi
           
           echo "latest_sha=$LATEST_SHA" >> $GITHUB_OUTPUT
           echo "latest_msg=$LATEST_MSG" >> $GITHUB_OUTPUT
           echo "latest_author=$LATEST_AUTHOR" >> $GITHUB_OUTPUT
           
-          echo "📊 Found $COMMIT_COUNT new commits"
-          echo "👥 Authors: $AUTHORS"
+          echo "📊 Found $COMMIT_COUNT new commits (not in target branch)"
+          echo "📊 Total commits in range: $TOTAL_COUNT"
 
-      # ──────────────────────────────────────────────────
-      # Step 3: Skip if no new commits
-      # ──────────────────────────────────────────────────
       - name: Skip if no new commits
         if: steps.commits.outputs.count == '0'
         shell: bash
         run: |
-          echo "ℹ️ No new commits to merge. Skipping."
+          echo "ℹ️ No new commits to merge. Skipping PR creation/update."
+          echo "action=none" >> $GITHUB_OUTPUT
+          
+          echo "## PR Management Result" >> $GITHUB_STEP_SUMMARY
+          echo "- Action: Skipped (no new commits)" >> $GITHUB_STEP_SUMMARY
+          echo "- Source branch is already up to date with target" >> $GITHUB_STEP_SUMMARY
 
-      # ──────────────────────────────────────────────────
-      # Step 4: Check existing PR
-      # ──────────────────────────────────────────────────
       - name: Check existing PR
         id: check
         if: steps.commits.outputs.count != '0'
@@ -173,153 +186,12 @@ jobs:
             echo "exists=true" >> $GITHUB_OUTPUT
             echo "pr_number=$PR_NUMBER" >> $GITHUB_OUTPUT
             echo "pr_url=$PR_URL" >> $GITHUB_OUTPUT
-            echo "✅ Found existing PR #$PR_NUMBER"
+            echo "Found existing PR #$PR_NUMBER" >> $GITHUB_STEP_SUMMARY
           else
             echo "exists=false" >> $GITHUB_OUTPUT
-            echo "📝 No existing PR found"
+            echo "No existing PR found" >> $GITHUB_STEP_SUMMARY
           fi
 
-      # ──────────────────────────────────────────────────
-      # Step 5: Get first committer (FIXED SIGPIPE)
-      # ──────────────────────────────────────────────────
-      - name: Get first committer
-        id: first-committer
-        if: steps.commits.outputs.count != '0'
-        shell: bash
-        run: |
-          # Use -1 instead of | head -1 to avoid SIGPIPE (exit 141)
-          FIRST_AUTHOR=$(git log origin/${{ inputs.target-branch }}..HEAD \
-            --no-merges \
-            --reverse \
-            --format='%ae' \
-            -1 2>/dev/null || echo "")
-          
-          FIRST_AUTHOR_NAME=$(git log origin/${{ inputs.target-branch }}..HEAD \
-            --no-merges \
-            --reverse \
-            --format='%an' \
-            -1 2>/dev/null || echo "")
-          
-          # Fallback: include merges if no regular commits
-          if [ -z "$FIRST_AUTHOR" ]; then
-            FIRST_AUTHOR=$(git log origin/${{ inputs.target-branch }}..HEAD \
-              --reverse \
-              --format='%ae' \
-              -1 2>/dev/null || echo "")
-            
-            FIRST_AUTHOR_NAME=$(git log origin/${{ inputs.target-branch }}..HEAD \
-              --reverse \
-              --format='%an' \
-              -1 2>/dev/null || echo "")
-          fi
-          
-          # Final fallback
-          if [ -z "$FIRST_AUTHOR" ]; then
-            FIRST_AUTHOR="unknown@unknown.com"
-            FIRST_AUTHOR_NAME="Unknown"
-          fi
-          
-          echo "email=$FIRST_AUTHOR" >> $GITHUB_OUTPUT
-          echo "name=$FIRST_AUTHOR_NAME" >> $GITHUB_OUTPUT
-          
-          echo "👤 First committer: $FIRST_AUTHOR_NAME ($FIRST_AUTHOR)"
-
-      # ──────────────────────────────────────────────────
-      # Step 6: Map email to GitHub username
-      # ──────────────────────────────────────────────────
-      - name: Map email to GitHub username
-        id: github-user
-        if: steps.first-committer.outputs.email != ''
-        shell: bash
-        env:
-          GH_TOKEN: ${{ secrets.github-token }}
-        run: |
-          USERNAME=""
-          
-          # Method 1: Search commits
-          SEARCH_RESULT=$(gh api "search/commits?q=committer-email:${{ steps.first-committer.outputs.email }}&per_page=1" \
-            --jq '.items[0].committer.login // empty' 2>/dev/null || echo "")
-          
-          if [ -n "$SEARCH_RESULT" ]; then
-            USERNAME="$SEARCH_RESULT"
-          fi
-          
-          # Method 2: Search users by name
-          if [ -z "$USERNAME" ]; then
-            USERNAME=$(gh api "search/users?q=${{ steps.first-committer.outputs.name }}&per_page=1" \
-              --jq '.items[0].login // empty' 2>/dev/null || echo "")
-          fi
-          
-          # Method 3: Extract from noreply email
-          if [ -z "$USERNAME" ]; then
-            if [[ "${{ steps.first-committer.outputs.email }}" =~ \+([^@]+)@users\.noreply\.github\.com ]]; then
-              USERNAME="${BASH_REMATCH[1]}"
-            fi
-          fi
-          
-          # Method 4: Use name as-is
-          if [ -z "$USERNAME" ]; then
-            USERNAME="${{ steps.first-committer.outputs.name }}"
-          fi
-          
-          echo "username=$USERNAME" >> $GITHUB_OUTPUT
-          echo "✅ GitHub username: $USERNAME"
-
-      # ──────────────────────────────────────────────────
-      # Step 7: Determine assignees
-      # ──────────────────────────────────────────────────
-      - name: Determine assignees
-        id: assignees
-        if: steps.commits.outputs.count != '0'
-        shell: bash
-        run: |
-          if [ -n "${{ inputs.assignees }}" ]; then
-            FINAL_ASSIGNEES="${{ inputs.assignees }}"
-          else
-            FINAL_ASSIGNEES="${{ steps.github-user.outputs.username }}"
-          fi
-          
-          echo "assignees=$FINAL_ASSIGNEES" >> $GITHUB_OUTPUT
-          echo "📌 Assignee: $FINAL_ASSIGNEES"
-
-      # ──────────────────────────────────────────────────
-      # Step 8: Clean Reviewers Format
-      # ──────────────────────────────────────────────────
-      - name: Clean Reviewers Format
-        id: reviewers
-        if: steps.commits.outputs.count != '0'
-        shell: bash
-        run: |
-          CLEAN_REVIEWERS=""
-          RAW_REVIEWERS="${{ inputs.reviewers }}"
-          
-          if [ -n "$RAW_REVIEWERS" ]; then
-            echo "🔧 Cleaning: $RAW_REVIEWERS"
-            
-            IFS=',' read -ra REVIEWER_ARRAY <<< "$RAW_REVIEWERS"
-            for reviewer in "${REVIEWER_ARRAY[@]}"; do
-              reviewer=$(echo "$reviewer" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
-              
-              if [ -n "$reviewer" ]; then
-                reviewer="${reviewer#@}"
-                
-                if [ -z "$CLEAN_REVIEWERS" ]; then
-                  CLEAN_REVIEWERS="$reviewer"
-                else
-                  CLEAN_REVIEWERS="$CLEAN_REVIEWERS,$reviewer"
-                fi
-                
-                echo "  ✅ $reviewer"
-              fi
-            done
-          fi
-          
-          echo "reviewers=$CLEAN_REVIEWERS" >> $GITHUB_OUTPUT
-          echo "👀 Reviewers: $CLEAN_REVIEWERS"
-
-      # ──────────────────────────────────────────────────
-      # Step 9: Create or Update PR
-      # ──────────────────────────────────────────────────
       - name: Create or Update PR
         id: pr
         if: steps.commits.outputs.count != '0'
@@ -327,22 +199,123 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.github-token }}
         run: |
-          # Build PR Body using temp file
-          CURRENT_TIME=$(date -u +"%Y-%m-%d %H:%M:%S UTC")
+          # Build PR body with commit list (only new commits)
+          PR_BODY=$(cat <<EOF
+          ## 🚀 Deployment Request: ${{ inputs.project-name }}
           
-          cat > /tmp/pr-body.md << 'ENDOFBODY'
-## 🚀 Deployment Request: __PROJECT_NAME__
+          | รายละเอียด | ข้อมูล |
+          |-----------|--------|
+          | **โปรเจค** | ${{ inputs.project-name }} |
+          | **ต้นทาง** | \`${{ inputs.source-branch }}\` |
+          | **ปลายทาง** | \`${{ inputs.target-branch }}\` |
+          | **จำนวน commits** | ${{ steps.commits.outputs.count }} |
+          | **Commit ล่าสุด** | ${{ steps.commits.outputs.latest_sha }} |
+          | **ผู้พัฒนา** | ${{ steps.commits.outputs.latest_author }} |
+          
+          ---
+          
+          ### 📝 รายการ commits:
+          
+          \`\`\`
+          ${{ steps.commits.outputs.list }}
+          \`\`\`
+          
+          ---
+          
+          ### ✅ ขั้นตอนการดำเนินการ:
+          
+          1. Review การเปลี่ยนแปลงข้างต้น
+          2. Approve PR นี้
+          3. Merge เพื่อ deploy ไปยัง ${{ inputs.target-branch }}
+          
+          *🤖 PR นี้ถูกสร้าง/อัพเดทโดยอัตโนมัติ*
+          EOF
+          )
+          
+          # Create title with commit count
+          PR_TITLE="[${{ inputs.project-name }}] ${{ inputs.source-branch }} → ${{ inputs.target-branch }} (${{ steps.commits.outputs.count }} commit(s))"
+          
+          if [ "${{ steps.check.outputs.exists }}" == "true" ]; then
+            if [ "${{ inputs.auto-update-existing }}" == "true" ]; then
+              # Update existing PR
+              echo "🔄 Updating existing PR #${{ steps.check.outputs.pr_number }}"
+              
+              gh pr edit ${{ steps.check.outputs.pr_number }} \
+                --title "$PR_TITLE" \
+                --body "$PR_BODY"
+              
+              echo "action=updated" >> $GITHUB_OUTPUT
+              echo "pr_number=${{ steps.check.outputs.pr_number }}" >> $GITHUB_OUTPUT
+              echo "pr_url=${{ steps.check.outputs.pr_url }}" >> $GITHUB_OUTPUT
+              
+              # Add comment about new commits
+              if [ "${{ steps.commits.outputs.count }}" -gt 0 ]; then
+                gh pr comment ${{ steps.check.outputs.pr_number }} \
+                  --body "📌 **อัพเดท**: มี commit ใหม่ ${{ steps.commits.outputs.count }} รายการ"
+              fi
+            else
+              echo "action=none" >> $GITHUB_OUTPUT
+              echo "ℹ️ Auto-update is disabled, skipping PR update"
+            fi
+          else
+            # Create new PR
+            echo "✨ Creating new PR"
+            
+            PR_URL=$(gh pr create \
+              --base ${{ inputs.target-branch }} \
+              --head ${{ inputs.source-branch }} \
+              --title "$PR_TITLE" \
+              --body "$PR_BODY" \
+              ${{ inputs.assignees != '' && format('--assignee "{0}"', inputs.assignees) || '' }} \
+              ${{ inputs.reviewers != '' && format('--reviewer "{0}"', inputs.reviewers) || '' }} \
+              ${{ inputs.labels != '' && format('--label "{0}"', inputs.labels) || '' }})
+            
+            PR_NUMBER=$(echo "$PR_URL" | grep -oP '(?<=pull/)\d+')
+            
+            echo "action=created" >> $GITHUB_OUTPUT
+            echo "pr_number=$PR_NUMBER" >> $GITHUB_OUTPUT
+            echo "pr_url=$PR_URL" >> $GITHUB_OUTPUT
+            
+            echo "✅ PR created: $PR_URL"
+          fi
 
-| รายละเอียด | ข้อมูล |
-|-----------|--------|
-| **โปรเจค** | __PROJECT_NAME__ |
-| **ต้นทาง** | `__SOURCE_BRANCH__` |
-| **ปลายทาง** | `__TARGET_BRANCH__` |
-| **จำนวน commits** | __COMMIT_COUNT__ |
-| **Commit แรกโดย** | __FIRST_COMMITTER__ |
-| **Commit ล่าสุด** | __LATEST_SHA__ |
-| **ผู้พัฒนาทั้งหมด** | __AUTHORS__ |
+      - name: Send notification (if enabled)
+        if: inputs.notify-on-pr-created == 'true' && steps.pr.outputs.action != 'none' && steps.pr.outputs.action != 'skipped'
+        shell: bash
+        run: |
+          if [ -n "${{ inputs.notification-webhook }}" ]; then
+            curl -X POST "${{ inputs.notification-webhook }}" \
+              -H "Content-Type: application/json" \
+              -d '{
+                "text": "📋 PR ${{ steps.pr.outputs.action }}: ${{ steps.pr.outputs.pr_url }}",
+                "project": "${{ inputs.project-name }}",
+                "commits": ${{ steps.commits.outputs.count }},
+                "source": "${{ inputs.source-branch }}",
+                "target": "${{ inputs.target-branch }}"
+              }' || true
+          fi
 
----
-
-### 📝 รายการ commits:
+      - name: Output PR info
+        id: pr-output
+        shell: bash
+        run: |
+          # Set outputs
+          echo "pr_number=${{ steps.pr.outputs.pr_number }}" >> $GITHUB_OUTPUT
+          echo "pr_url=${{ steps.pr.outputs.pr_url }}" >> $GITHUB_OUTPUT
+          echo "action=${{ steps.pr.outputs.action }}" >> $GITHUB_OUTPUT
+          
+          # Create detailed step summary
+          cat >> $GITHUB_STEP_SUMMARY << 'EOF'
+          ## 📋 PR Management Result
+          
+          | รายการ | ผลลัพธ์ |
+          |--------|---------|
+          | **Action** | ${{ steps.pr.outputs.action }} |
+          | **New Commits** | ${{ steps.commits.outputs.count }} |
+          | **PR Number** | #${{ steps.pr.outputs.pr_number }} |
+          | **PR URL** | ${{ steps.pr.outputs.pr_url }} |
+          
+          ---
+          
+          ### 📝 Commits in this PR
+          
