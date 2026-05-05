@@ -17,8 +17,9 @@ def call(Map config = [:]) {
     def dbCredId = config.dbCredId
     def gitCredId = config.gitCredId ?: 'github-token-cred'
     def backupEnabled = config.backupEnabled != null ? config.backupEnabled : true
+    def sqlBackupPath = config.sqlBackupPath ?: 'C:/X-BACKUP/SQL'
+    def stopOnError = config.stopOnError != null ? config.stopOnError : true
     
-    // ...
     echo "🔍 Remote SQL Execution from ${host} to DB Server: ${sqlHost}:${sqlPort} (DB: ${dbName})"
 
     // 1. Checkout Scripts มาที่เครื่อง Jenkins (Linux)
@@ -32,20 +33,17 @@ def call(Map config = [:]) {
         sshagent([sshCredId]) {
             withCredentials([usernamePassword(credentialsId: dbCredId, usernameVariable: 'SQL_USER', passwordVariable: 'SQL_PASS')]) {
                 
-                // 2. Validate Scripts (ตามลำดับ Structure -> Stored -> Data)
+                // 2. Validate Scripts
                 def targetScripts = [
                     "Script-StoreBack-Structure.sql",
                     "Script-StoreBack-Stored.sql",
                     "Script-StoreBack-Data.sql"
                 ]
                 def foundScripts = []
-                
                 targetScripts.each { scriptName ->
                     if (fileExists(scriptName)) {
                         foundScripts << scriptName
                         echo "  [FOUND] ${scriptName}"
-                    } else {
-                        echo "  [MISSING] ${scriptName}"
                     }
                 }
 
@@ -54,22 +52,23 @@ def call(Map config = [:]) {
                     return
                 }
 
-                // 3. Verify SQL Connection
+                // 3. Verify SQL Connection (ใช้การต่อ String แบบปลอดภัย)
                 echo "🔌 Verifying SQL Connection..."
-                def verifyCmd = "sqlcmd -S ${sqlHost},${sqlPort} -U ${SQL_USER} -P ${SQL_PASS} -d ${dbName} -Q \"SELECT @@SERVERNAME, DB_NAME()\" -W -h -1"
+                def verifyCmd = "sqlcmd -S ${sqlHost},${sqlPort} -U \\\$SQL_USER -P \\\$SQL_PASS -d ${dbName} -Q \\\"SELECT @@SERVERNAME, DB_NAME()\\\" -W -h -1"
                 sh "ssh -o StrictHostKeyChecking=no ${user}@${host} \"powershell -Command \\\"${verifyCmd}\\\"\""
                 
                 // 4. Backup Database
                 if (backupEnabled) {
                     echo "💾 Backing up Database [${dbName}]..."
                     def timestamp = new Date().format('yyyyMMdd_HHmmss', TimeZone.getTimeZone('Asia/Bangkok'))
+                    // ใช้ \$ แทน $ เพื่อให้ Shell เป็นคนประมวลผล Environment Variable
                     def psBackupCmd = """
                         \$backupDir = Join-Path '${sqlBackupPath}' '${projectName}';
                         \$backupFile = '${dbName}_${timestamp}.bak';
                         \$backupDest = Join-Path \$backupDir \$backupFile;
-                        sqlcmd -S ${sqlHost},${sqlPort} -U ${SQL_USER} -P ${SQL_PASS} -Q "EXEC master.dbo.xp_create_subdir N'\$backupDir';";
+                        sqlcmd -S ${sqlHost},${sqlPort} -U \\\$SQL_USER -P \\\$SQL_PASS -Q "EXEC master.dbo.xp_create_subdir N'\$backupDir';";
                         \$sql = "BACKUP DATABASE [${dbName}] TO DISK = N'\$backupDest' WITH INIT, COMPRESSION, CHECKSUM";
-                        sqlcmd -S ${sqlHost},${sqlPort} -U ${SQL_USER} -P ${SQL_PASS} -Q \$sql -b;
+                        sqlcmd -S ${sqlHost},${sqlPort} -U \\\$SQL_USER -P \\\$SQL_PASS -Q \$sql -b;
                     """.stripIndent().trim().replace('\n', ' ')
                     
                     sh "ssh -o StrictHostKeyChecking=no ${user}@${host} \"powershell -Command \\\"${psBackupCmd}\\\"\""
@@ -79,24 +78,18 @@ def call(Map config = [:]) {
                 echo "🚀 Executing Scripts..."
                 foundScripts.each { scriptName ->
                     echo "   Running: ${scriptName}"
-                    // ส่งไฟล์ไปที่เครื่องเป้าหมายชั่วคราว (App Server)
                     sh "scp -o StrictHostKeyChecking=no ${scriptName} ${user}@${host}:C:/Windows/Temp/${scriptName}"
                     
-                    // รันด้วย -f 65001 (UTF-8) โดยยิงไปที่ SQL Server
-                    def psExecCmd = "sqlcmd -S ${sqlHost},${sqlPort} -U ${SQL_USER} -P ${SQL_PASS} -d ${dbName} -i C:/Windows/Temp/${scriptName} -f 65001 -b -r1"
+                    def psExecCmd = "sqlcmd -S ${sqlHost},${sqlPort} -U \\\$SQL_USER -P \\\$SQL_PASS -d ${dbName} -i C:/Windows/Temp/${scriptName} -f 65001 -b -r1"
                     def status = sh(script: "ssh -o StrictHostKeyChecking=no ${user}@${host} \"powershell -Command \\\"${psExecCmd}\\\"\"", returnStatus: true)
                     
-                    // Cleanup ไฟล์ชั่วคราว
                     sh "ssh -o StrictHostKeyChecking=no ${user}@${host} \"powershell -Command \\\"Remove-Item C:/Windows/Temp/${scriptName} -Force\\\"\""
                     
                     if (status != 0) {
                         echo "❌ ERROR: Failed to execute ${scriptName}"
-                        if (stopOnError) {
-                            error("SQL Execution stopped due to error in ${scriptName}")
-                        }
+                        if (stopOnError) { error("SQL Execution stopped due to error in ${scriptName}") }
                     }
                 }
-                
                 echo "✅ SQL Execution Completed Successfully!"
             }
         }
