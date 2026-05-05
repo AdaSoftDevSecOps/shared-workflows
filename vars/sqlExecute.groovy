@@ -52,22 +52,24 @@ def call(Map config = [:]) {
                     return
                 }
 
-                // 3. Verify SQL Connection (ใช้ ${} เพื่อดึงค่าโดยตรง และครอบด้วย ' ' เพื่อความปลอดภัย)
+                // 3. Verify SQL Connection
                 echo "🔌 Verifying SQL Connection..."
-                def verifyCmd = "sqlcmd -S ${sqlHost},${sqlPort} -U ${SQL_USER} -P '${SQL_PASS}' -d ${dbName} -Q 'SELECT 1' -W -h -1"
+                // ใช้ \\\" ครอบค่าเพื่อให้ Windows รับค่า Quote ได้ถูกต้อง
+                def verifyCmd = "sqlcmd -S ${sqlHost},${sqlPort} -U ${SQL_USER} -P \\\"${SQL_PASS}\\\" -d ${dbName} -Q \\\"SELECT 1\\\" -W -h -1"
                 sh "ssh -o StrictHostKeyChecking=no ${user}@${host} \"powershell -Command \\\"${verifyCmd}\\\"\""
                 
                 // 4. Backup Database
                 if (backupEnabled) {
                     echo "💾 Backing up Database [${dbName}]..."
                     def timestamp = new Date().format('yyyyMMdd_HHmmss', TimeZone.getTimeZone('Asia/Bangkok'))
+                    // ใช้ \\\$ เพื่อให้ตัวแปร $ หลุดไปทำงานที่ PowerShell ฝั่ง Windows
                     def psBackupCmd = """
-                        \$backupDir = Join-Path '${sqlBackupPath}' '${projectName}';
-                        \$backupFile = '${dbName}_${timestamp}.bak';
-                        \$backupDest = Join-Path \$backupDir \$backupFile;
-                        sqlcmd -S ${sqlHost},${sqlPort} -U ${SQL_USER} -P '${SQL_PASS}' -Q "EXEC master.dbo.xp_create_subdir N'\$backupDir';";
-                        \$sql = 'BACKUP DATABASE [${dbName}] TO DISK = N\"'\$backupDest'\" WITH INIT, COMPRESSION, CHECKSUM';
-                        sqlcmd -S ${sqlHost},${sqlPort} -U ${SQL_USER} -P '${SQL_PASS}' -Q \$sql -b;
+                        \\\$backupDir = Join-Path '${sqlBackupPath}' '${projectName}';
+                        \\\$backupFile = '${dbName}_${timestamp}.bak';
+                        \\\$backupDest = Join-Path \\\$backupDir \\\$backupFile;
+                        sqlcmd -S ${sqlHost},${sqlPort} -U ${SQL_USER} -P \\\"${SQL_PASS}\\\" -Q \\\"EXEC master.dbo.xp_create_subdir N'\\\$backupDir';\\\";
+                        \\\$sql = \\\"BACKUP DATABASE [${dbName}] TO DISK = N'\\\$backupDest' WITH INIT, COMPRESSION, CHECKSUM\\\";
+                        sqlcmd -S ${sqlHost},${sqlPort} -U ${SQL_USER} -P \\\"${SQL_PASS}\\\" -Q \\\$sql -b;
                     """.stripIndent().trim().replace('\n', ' ')
                     
                     sh "ssh -o StrictHostKeyChecking=no ${user}@${host} \"powershell -Command \\\"${psBackupCmd}\\\"\""
@@ -77,11 +79,13 @@ def call(Map config = [:]) {
                 echo "🚀 Executing Scripts..."
                 foundScripts.each { scriptName ->
                     echo "   Running: ${scriptName}"
+                    // ส่งไฟล์ไปที่เครื่องเป้าหมายชั่วคราว (App Server)
                     sh "scp -o StrictHostKeyChecking=no ${scriptName} ${user}@${host}:C:/Windows/Temp/${scriptName}"
                     
-                    def psExecCmd = "sqlcmd -S ${sqlHost},${sqlPort} -U ${SQL_USER} -P '${SQL_PASS}' -d ${dbName} -i C:/Windows/Temp/${scriptName} -f 65001 -b -r1"
+                    def psExecCmd = "sqlcmd -S ${sqlHost},${sqlPort} -U ${SQL_USER} -P \\\"${SQL_PASS}\\\" -d ${dbName} -i C:/Windows/Temp/${scriptName} -f 65001 -b -r1"
                     def status = sh(script: "ssh -o StrictHostKeyChecking=no ${user}@${host} \"powershell -Command \\\"${psExecCmd}\\\"\"", returnStatus: true)
                     
+                    // Cleanup ไฟล์ชั่วคราวบน Windows
                     sh "ssh -o StrictHostKeyChecking=no ${user}@${host} \"powershell -Command \\\"Remove-Item C:/Windows/Temp/${scriptName} -Force\\\"\""
                     
                     if (status != 0) {
