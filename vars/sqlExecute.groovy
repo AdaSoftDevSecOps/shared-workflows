@@ -1,6 +1,5 @@
 /**
- * SQL Executor (Remote SSH Version - Script-based)
- * วิธีนี้จะสร้างไฟล์ PowerShell ขึ้นมาส่งไปรัน เพื่อเลี่ยงปัญหาเรื่อง Quotes ซ้อนกัน
+ * SQL Executor (Remote SSH Version - Script-based V2)
  */
 def call(Map config = [:]) {
     def host = config.host
@@ -17,7 +16,7 @@ def call(Map config = [:]) {
     def sqlBackupPath = config.sqlBackupPath ?: 'C:/X-BACKUP/SQL'
     def stopOnError = config.stopOnError != null ? config.stopOnError : true
     
-    echo "🔍 SQL Execution (Script-based) to ${sqlHost}:${sqlPort}"
+    echo "🔍 SQL Execution (Robust Scripting) to ${sqlHost}:${sqlPort}"
 
     dir('temp-sql-scripts') {
         git(url: 'https://github.com/AdaSoftDevSecOps/AdaScriptCenter.git', branch: scriptBranch, credentialsId: gitCredId)
@@ -25,7 +24,6 @@ def call(Map config = [:]) {
         sshagent([sshCredId]) {
             withCredentials([usernamePassword(credentialsId: dbCredId, usernameVariable: 'SQL_USER', passwordVariable: 'SQL_PASS')]) {
                 
-                // 1. ค้นหาสคริปต์ที่มีอยู่จริง
                 def targetScripts = ["Script-StoreBack-Structure.sql", "Script-StoreBack-Stored.sql", "Script-StoreBack-Data.sql"]
                 def foundScripts = []
                 targetScripts.each { if (fileExists(it)) { foundScripts << it } }
@@ -35,15 +33,25 @@ def call(Map config = [:]) {
                     return
                 }
 
-                // 2. สร้างไฟล์ PowerShell Script (.ps1) สำหรับรันงานทั้งหมด
                 def timestamp = new Date().format('yyyyMMdd_HHmmss', TimeZone.getTimeZone('Asia/Bangkok'))
+                
+                // ใช้ @' '@ (Here-String) เพื่อป้องกันอักขระพิเศษใน Password ทุกรูปแบบ
                 def psContent = """
                     \$ErrorActionPreference = "Stop"
+                    
+                    # บันทึกรหัสผ่านลงตัวแปรแบบ Here-String (ปลอดภัยต่ออักขระพิเศษ)
+                    \$user = @'
+${SQL_USER}
+'@
+                    \$pass = @'
+${SQL_PASS}
+'@
+
                     Write-Host "--- SQL Execution Task Start ---"
                     
                     # 1. Connection Verify
                     Write-Host "🔌 Verifying Connection..."
-                    sqlcmd -S ${sqlHost},${sqlPort} -U "${SQL_USER}" -P '${SQL_PASS.replace("'", "''")}' -d ${dbName} -Q "SELECT 1" -b -W
+                    sqlcmd -S ${sqlHost},${sqlPort} -U \$user -P \$pass -d ${dbName} -Q "SELECT 1" -b -W
                     if (\$LASTEXITCODE -ne 0) { throw "Connection Failed" }
 
                     # 2. Backup Database
@@ -53,9 +61,9 @@ def call(Map config = [:]) {
                         \$backupFile = "${dbName}_${timestamp}.bak"
                         \$backupDest = Join-Path \$backupDir \$backupFile
                         
-                        sqlcmd -S ${sqlHost},${sqlPort} -U "${SQL_USER}" -P '${SQL_PASS.replace("'", "''")}' -Q "EXEC master.dbo.xp_create_subdir N'\$backupDir';" -b
+                        sqlcmd -S ${sqlHost},${sqlPort} -U \$user -P \$pass -Q "EXEC master.dbo.xp_create_subdir N'\$backupDir';" -b
                         \$sqlBackup = "BACKUP DATABASE [${dbName}] TO DISK = N'\$backupDest' WITH INIT, COMPRESSION, CHECKSUM"
-                        sqlcmd -S ${sqlHost},${sqlPort} -U "${SQL_USER}" -P '${SQL_PASS.replace("'", "''")}' -Q \$sqlBackup -b
+                        sqlcmd -S ${sqlHost},${sqlPort} -U \$user -P \$pass -Q \$sqlBackup -b
                     }
 
                     # 3. Execute Scripts
@@ -64,7 +72,7 @@ def call(Map config = [:]) {
                     foreach (\$s in \$scripts) {
                         Write-Host "   Running: \$s"
                         \$fullPath = "C:/Windows/Temp/\$s"
-                        sqlcmd -S ${sqlHost},${sqlPort} -U "${SQL_USER}" -P '${SQL_PASS.replace("'", "''")}' -d ${dbName} -i \$fullPath -f 65001 -b -r1
+                        sqlcmd -S ${sqlHost},${sqlPort} -U \$user -P \$pass -d ${dbName} -i \$fullPath -f 65001 -b -r1
                         if (\$LASTEXITCODE -ne 0) { 
                             if ("${stopOnError}" -eq "true") { throw "Execution Failed at \$s" }
                             else { Write-Warning "Failed at \$s but continuing..." }
@@ -75,24 +83,20 @@ def call(Map config = [:]) {
 
                 writeFile file: 'execute_sql.ps1', text: psContent, encoding: 'UTF-8'
 
-                // 3. ส่งไฟล์ .ps1 และไฟล์ .sql ทั้งหมดไปที่ Windows
                 echo "🚚 Transferring files to Windows..."
                 sh "scp -o StrictHostKeyChecking=no execute_sql.ps1 ${user}@${host}:C:/Windows/Temp/execute_sql.ps1"
                 foundScripts.each { sh "scp -o StrictHostKeyChecking=no ${it} ${user}@${host}:C:/Windows/Temp/${it}" }
 
-                // 4. รันไฟล์ .ps1 ผ่าน SSH
                 echo "⚡ Executing Task on Remote Server..."
                 def status = sh(
                     script: "ssh -o StrictHostKeyChecking=no ${user}@${host} \"powershell -ExecutionPolicy Bypass -File C:/Windows/Temp/execute_sql.ps1\"",
                     returnStatus: true
                 )
 
-                // 5. Cleanup
+                // Cleanup
                 sh "ssh -o StrictHostKeyChecking=no ${user}@${host} \"powershell -Command \\\"Remove-Item C:/Windows/Temp/Script-StoreBack-*.sql, C:/Windows/Temp/execute_sql.ps1 -Force -ErrorAction SilentlyContinue\\\"\""
                 
-                if (status != 0) {
-                    error "❌ SQL Execution Task failed. Check logs above."
-                }
+                if (status != 0) { error "❌ SQL Execution Task failed. Check logs above." }
                 echo "✅ SQL Execution Task Completed!"
             }
         }
