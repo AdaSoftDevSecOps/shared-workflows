@@ -85,13 +85,13 @@ def call(Map config = [:]) {
 
         // --- Step 4: ล้างของเก่าและลงของใหม่ ---
         echo "🚚 Transferring and Extracting..."
-        sh "ssh -o StrictHostKeyChecking=no ${user}@${host} \"powershell -Command \\\"Get-ChildItem '${deployPath}' | Remove-Item -Recurse -Force\\\"\""
+        sh "ssh -o StrictHostKeyChecking=no ${user}@${host} \"powershell -Command \\\"\\\$ProgressPreference = 'SilentlyContinue'; Get-ChildItem '${deployPath}' | Remove-Item -Recurse -Force\\\"\""
         sh "scp -o StrictHostKeyChecking=no ${env.WORKSPACE}/project.zip ${user}@${host}:'${deployPath}\\project.zip'"
-        sh "ssh -o StrictHostKeyChecking=no ${user}@${host} \"powershell -Command \\\"Expand-Archive -Path '${deployPath}\\project.zip' -DestinationPath '${deployPath}' -Force; Remove-Item '${deployPath}\\project.zip' -Force\\\"\""
+        sh "ssh -o StrictHostKeyChecking=no ${user}@${host} \"powershell -Command \\\"\\\$ProgressPreference = 'SilentlyContinue'; Expand-Archive -Path '${deployPath}\\project.zip' -DestinationPath '${deployPath}' -Force; Remove-Item '${deployPath}\\project.zip' -Force\\\"\""
 
         // --- Step 5: คืนค่าไฟล์ที่ Preserve ไว้ ---
         echo "🔄 Restoring preserved files..."
-        sh "ssh -o StrictHostKeyChecking=no ${user}@${host} \"powershell -Command \\\"if(Test-Path '${tempBackupDir}'){ Copy-Item '${tempBackupDir}\\*' '${deployPath}' -Recurse -Force; Remove-Item '${tempBackupDir}' -Recurse -Force }\\\"\""
+        sh "ssh -o StrictHostKeyChecking=no ${user}@${host} \"powershell -Command \\\"\\\$ProgressPreference = 'SilentlyContinue'; if(Test-Path '${tempBackupDir}'){ Copy-Item '${tempBackupDir}\\*' '${deployPath}' -Recurse -Force; Remove-Item '${tempBackupDir}' -Recurse -Force }\\\"\""
 
         // --- Step 6: ลบ Backup เก่า (Keep Count) ---
         echo "🧹 Cleaning up old backups..."
