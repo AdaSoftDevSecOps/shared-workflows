@@ -1,5 +1,5 @@
 /**
- * PHP Deployment Template (Remote SSH Version - V1 Parity)
+ * PHP Deployment Template (Remote SSH Version - Improved Backup)
  * Jenkins (Linux) -> Windows Server via SSH/SCP
  */
 def call(Map config = [:]) {
@@ -7,19 +7,16 @@ def call(Map config = [:]) {
     def user = config.user
     def sshCredId = config.sshCredId
     def projectName = config.projectName
-    def deployPath = config.deployPath
-    def backupPath = config.backupPath
-    def configBackupPath = "${backupPath}/ConfigFile"
+    def deployPath = config.deployPath.replace('/', '\\') // ปรับ Path เป็น Windows Style
+    def backupPath = config.backupPath.replace('/', '\\')
+    def configBackupPath = "${backupPath}\\ConfigFile"
     
-    // ใหม่: รองรับ Source Subfolder และ Backup Keep Count
     def sourceSubfolder = config.sourceSubfolder ?: "."
     def backupKeepCount = config.backupKeepCount ?: 5
     
-    // รายชื่อไฟล์/โฟลเดอร์ที่จะเก็บไว้ (Preserve)
     def preserveFiles = config.preserveFiles ?: "config_deploy.php"
     def preserveFolders = config.preserveFolders ?: "Logs,uploads"
     
-    // รายชื่อไฟล์/โฟลเดอร์ที่ไม่ต้องส่งไป (Exclude)
     def excludeFiles = config.excludeFiles ?: "config_deploy.php"
     def excludeFolders = config.excludeFolders ?: "Logs,uploads,.git,.github"
     
@@ -30,75 +27,88 @@ def call(Map config = [:]) {
 
     sshagent([sshCredId]) {
         // --- Step 1: เตรียมไฟล์บนเครื่อง Jenkins (Linux) ---
-        echo "📦 Packaging project from: ${sourceSubfolder}"
+        echo "📦 Packaging project..."
         def excludeCmd = ""
-        excludeFolders.split(',').each { excludeCmd += " -x '${it}/*'" }
-        excludeFiles.split(',').each { excludeCmd += " -x '${it}'" }
+        excludeFolders.split(',').each { if(it) excludeCmd += " -x '${it}/*'" }
+        excludeFiles.split(',').each { if(it) excludeCmd += " -x '${it}'" }
         
-        // เข้าไปใน subfolder ก่อนแล้วค่อย zip เพื่อไม่ให้ติดโครงสร้างโฟลเดอร์เข้าไป
         sh "cd ${sourceSubfolder} && zip -r ${env.WORKSPACE}/project.zip ./* ${excludeCmd}"
 
         // --- Step 2: เตรียม Folder บน Windows ---
         echo "📁 Preparing directories on Windows..."
         def prepCmd = """
-            if (!(Test-Path '${backupPath}')) { New-Item -ItemType Directory -Path '${backupPath}' -Force }
-            if (!(Test-Path '${configBackupPath}')) { New-Item -ItemType Directory -Path '${configBackupPath}' -Force }
-            if (!(Test-Path '${deployPath}')) { New-Item -ItemType Directory -Path '${deployPath}' -Force }
-        """.stripIndent().trim().replace('\n', ';')
+            if(!(Test-Path '${deployPath}')){ New-Item -ItemType Directory -Path '${deployPath}' -Force };
+            if(!(Test-Path '${backupPath}')){ New-Item -ItemType Directory -Path '${backupPath}' -Force };
+            if(!(Test-Path '${configBackupPath}')){ New-Item -ItemType Directory -Path '${configBackupPath}' -Force };
+        """.stripIndent().trim().replace('\n', ' ')
         sh "ssh -o StrictHostKeyChecking=no ${user}@${host} \"powershell -Command \\\"${prepCmd}\\\"\""
 
-        // --- Step 3: Preserve & Backup เดิม (ถ้ามี) ---
+        // --- Step 3: เก็บไฟล์เดิม (Preserve) & Backup ของเก่า ---
         echo "💾 Preserving files & backing up current version..."
-        def preserveCmd = """
-            # 3.1 Backup Full Current Version
-            \$backupFile = '${backupPath}\\${projectName}_${timestamp}.zip'
-            if (Test-Path '${deployPath}\\*') {
-                & 'C:\\Program Files\\7-Zip\\7z.exe' a -tzip \$backupFile '${deployPath}\\*' -r
-            }
-            # 3.2 Preserve Specific Files
-            '${preserveFiles}'.Split(',') | ForEach-Object {
-                \$f = \$_.Trim(); if (Test-Path '${deployPath}\\\$f') { Copy-Item '${deployPath}\\\$f' '${configBackupPath}\\' -Force }
-            }
-            # 3.3 Preserve Folders (Zip it)
-            '${preserveFolders}'.Split(',') | ForEach-Object {
-                \$fd = \$_.Trim(); if (Test-Path '${deployPath}\\\$fd') { 
-                    & 'C:\\Program Files\\7-Zip\\7z.exe' a -tzip '${configBackupPath}\\\${\$fd}_${timestamp}.zip' '${deployPath}\\\${\$fd}\\*' -r
+        
+        def tempBackupDir = "C:\\Windows\\Temp\\deploy_backup_${timestamp}"
+        def backupFile = "${backupPath}\\${projectName}_${timestamp}.zip"
+        
+        def backupAndPreserveCmd = """
+            New-Item -ItemType Directory -Path '${tempBackupDir}' -Force;
+            
+            # 1. เก็บไฟล์สำคัญไปไว้ที่ Temp และ ConfigBackup
+            \$files = '${preserveFiles}'.Split(',');
+            foreach(\$f in \$files) {
+                if(Test-Path '${deployPath}\\\$f'){ 
+                    Copy-Item '${deployPath}\\\$f' '${tempBackupDir}\\\$f' -Force;
+                    Copy-Item '${deployPath}\\\$f' '${configBackupPath}\\\$f' -Force;
+                    Write-Host "Preserved file: \$f";
                 }
             }
-        """.stripIndent().trim().replace('\n', ';')
-        sh "ssh -o StrictHostKeyChecking=no ${user}@${host} \"powershell -Command \\\"${preserveCmd}\\\"\""
 
-        // --- Step 4: ส่งไฟล์และแตกไฟล์ ---
+            # 2. เก็บโฟลเดอร์สำคัญไปไว้ที่ Temp
+            \$folders = '${preserveFolders}'.Split(',');
+            foreach(\$fd in \$folders) {
+                if(Test-Path '${deployPath}\\\$fd'){ 
+                    Copy-Item '${deployPath}\\\$fd' '${tempBackupDir}\\\$fd' -Recurse -Force;
+                    Write-Host "Preserved folder: \$fd";
+                }
+            }
+
+            # 3. Backup ของเก่าทั้งก้อน (ถ้ามีไฟล์อยู่)
+            if((Get-ChildItem '${deployPath}').Count -gt 0){
+                Write-Host "Zipping current version...";
+                Compress-Archive -Path '${deployPath}\\*' -DestinationPath '${backupFile}' -Force;
+            } else {
+                Write-Host "Nothing to backup, folder is empty.";
+            }
+        """.stripIndent().trim().replace('\n', ' ')
+        
+        sh "ssh -o StrictHostKeyChecking=no ${user}@${host} \"powershell -Command \\\"${backupAndPreserveCmd}\\\"\""
+
+        // --- Step 4: ล้างของเก่าและลงของใหม่ ---
         echo "🚚 Transferring and Extracting..."
-        sh "scp -o StrictHostKeyChecking=no project.zip ${user}@${host}:\"${deployPath}/project.zip\""
-        sh "ssh -o StrictHostKeyChecking=no ${user}@${host} \"powershell -Command \\\"tar -xf '${deployPath}\\project.zip' -C '${deployPath}'; Remove-Item '${deployPath}\\project.zip' -Force\\\"\""
+        
+        // ลบไฟล์ใน deployPath (เว้นไว้แต่โฟลเดอร์ที่ระบบจองไว้)
+        sh "ssh -o StrictHostKeyChecking=no ${user}@${host} \"powershell -Command \\\"Get-ChildItem '${deployPath}' | Remove-Item -Recurse -Force\\\"\""
+        
+        // ส่งไฟล์และแตกไฟล์
+        sh "scp -o StrictHostKeyChecking=no ${env.WORKSPACE}/project.zip ${user}@${host}:'${deployPath}\\project.zip'"
+        sh "ssh -o StrictHostKeyChecking=no ${user}@${host} \"powershell -Command \\\"Expand-Archive -Path '${deployPath}\\project.zip' -DestinationPath '${deployPath}' -Force; Remove-Item '${deployPath}\\project.zip' -Force\\\"\""
 
-        // --- Step 5: Restore Preserved Items ---
-        echo "♻️ Restoring preserved files..."
-        def restoreCmd = """
-            # 5.1 Restore Files
-            '${preserveFiles}'.Split(',') | ForEach-Object {
-                \$f = \$_.Trim(); if (Test-Path '${configBackupPath}\\\$f') { Copy-Item '${configBackupPath}\\\$f' '${deployPath}\\' -Force }
-            }
-            # 5.2 Restore Folders (Extract latest zip)
-            '${preserveFolders}'.Split(',') | ForEach-Object {
-                \$fd = \$_.Trim(); 
-                \$latest = Get-ChildItem '${configBackupPath}\\\${\$fd}_*.zip' | Sort-Object LastWriteTime -Descending | Select-Object -First 1
-                if (\$latest) { tar -xf \$latest.FullName -C '${deployPath}\\\$fd' }
-            }
-        """.stripIndent().trim().replace('\n', ';')
-        sh "ssh -o StrictHostKeyChecking=no ${user}@${host} \"powershell -Command \\\"${restoreCmd}\\\"\""
+        // --- Step 5: คืนค่าไฟล์ที่ Preserve ไว้ ---
+        echo "🔄 Restoring preserved files..."
+        sh "ssh -o StrictHostKeyChecking=no ${user}@${host} \"powershell -Command \\\"Copy-Item '${tempBackupDir}\\*' '${deployPath}' -Recurse -Force; Remove-Item '${tempBackupDir}' -Recurse -Force\\\"\""
 
-        // --- Step 6: Cleanup (ใช้ค่า backupKeepCount) ---
-        echo "🧹 Cleaning up old backups (Keep: ${backupKeepCount})..."
+        // --- Step 6: ลบ Backup เก่า (Keep Count) ---
+        echo "🧹 Cleaning up old backups..."
         def cleanupCmd = """
-            Get-ChildItem '${backupPath}\\${projectName}_*.zip' | Sort-Object LastWriteTime -Descending | Select-Object -Skip ${backupKeepCount} | Remove-Item -Force
-            Get-ChildItem '${configBackupPath}\\*.zip' | Sort-Object LastWriteTime -Descending | Select-Object -Skip ${backupKeepCount * 2} | Remove-Item -Force
-        """.stripIndent().trim().replace('\n', ';')
+            \$backups = Get-ChildItem '${backupPath}' -Filter '*.zip' | Sort-Object LastWriteTime -Descending;
+            if(\$backups.Count -gt ${backupKeepCount}){
+                \$backups | Select-Object -Skip ${backupKeepCount} | Remove-Item -Force;
+            }
+        """.stripIndent().trim().replace('\n', ' ')
         sh "ssh -o StrictHostKeyChecking=no ${user}@${host} \"powershell -Command \\\"${cleanupCmd}\\\"\""
-
-        // Cleanup local zip
-        sh "rm project.zip"
-        echo "✅ Deployment Completed Successfully!"
+        
+        // Cleanup เครื่อง Jenkins
+        sh "rm -f ${env.WORKSPACE}/project.zip"
+        
+        echo "✅ Deployment Successful!"
     }
 }
