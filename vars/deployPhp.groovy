@@ -36,7 +36,7 @@ def call(Map config = [:]) {
         excludeFiles.split(',').each { excludeCmd += " -x '${it}'" }
         
         // เข้าไปใน subfolder ก่อนแล้วค่อย zip เพื่อไม่ให้ติดโครงสร้างโฟลเดอร์เข้าไป
-        sh "cd ${sourceSubfolder} && zip -r ../project.zip ./* ${excludeCmd}"
+        sh "cd ${sourceSubfolder} && zip -r ${env.WORKSPACE}/project.zip ./* ${excludeCmd}"
 
         // --- Step 2: เตรียม Folder บน Windows ---
         echo "📁 Preparing directories on Windows..."
