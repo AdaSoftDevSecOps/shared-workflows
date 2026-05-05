@@ -52,22 +52,21 @@ def call(Map config = [:]) {
                     return
                 }
 
-                // 3. Verify SQL Connection (ใช้การต่อ String แบบปลอดภัย)
+                // 3. Verify SQL Connection (ใช้ Single Quote รอบ SQL Query เพื่อเลี่ยงปัญหา Quote ซ้อน)
                 echo "🔌 Verifying SQL Connection..."
-                def verifyCmd = "sqlcmd -S ${sqlHost},${sqlPort} -U \\\$SQL_USER -P \\\$SQL_PASS -d ${dbName} -Q \\\"SELECT @@SERVERNAME, DB_NAME()\\\" -W -h -1"
+                def verifyCmd = "sqlcmd -S ${sqlHost},${sqlPort} -U \\\$SQL_USER -P \\\$SQL_PASS -d ${dbName} -Q 'SELECT 1' -W -h -1"
                 sh "ssh -o StrictHostKeyChecking=no ${user}@${host} \"powershell -Command \\\"${verifyCmd}\\\"\""
                 
                 // 4. Backup Database
                 if (backupEnabled) {
                     echo "💾 Backing up Database [${dbName}]..."
                     def timestamp = new Date().format('yyyyMMdd_HHmmss', TimeZone.getTimeZone('Asia/Bangkok'))
-                    // ใช้ \$ แทน $ เพื่อให้ Shell เป็นคนประมวลผล Environment Variable
                     def psBackupCmd = """
                         \$backupDir = Join-Path '${sqlBackupPath}' '${projectName}';
                         \$backupFile = '${dbName}_${timestamp}.bak';
                         \$backupDest = Join-Path \$backupDir \$backupFile;
                         sqlcmd -S ${sqlHost},${sqlPort} -U \\\$SQL_USER -P \\\$SQL_PASS -Q "EXEC master.dbo.xp_create_subdir N'\$backupDir';";
-                        \$sql = "BACKUP DATABASE [${dbName}] TO DISK = N'\$backupDest' WITH INIT, COMPRESSION, CHECKSUM";
+                        \$sql = 'BACKUP DATABASE [${dbName}] TO DISK = N\"'\$backupDest'\" WITH INIT, COMPRESSION, CHECKSUM';
                         sqlcmd -S ${sqlHost},${sqlPort} -U \\\$SQL_USER -P \\\$SQL_PASS -Q \$sql -b;
                     """.stripIndent().trim().replace('\n', ' ')
                     
