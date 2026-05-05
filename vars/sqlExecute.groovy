@@ -61,7 +61,8 @@ def call(Map config = [:]) {
             // 5. Execute Scripts
             echo "🚀 Executing Scripts..."
             foundScripts.each { script ->
-                echo "   Running: ${script}"
+                echo "--- [RUNNING] ${script} ---"
+                // รันจากไฟล์ใน Workspace ของ Linux ได้เลย
                 def status = sh(
                     script: "${sqlcmd} -S ${sqlHost},${sqlPort} -U \$SQL_USER -P \$SQL_PASS -d ${dbName} -i ${script} -f 65001 -b -r1 -C",
                     returnStatus: true
@@ -70,7 +71,10 @@ def call(Map config = [:]) {
                 if (status != 0) {
                     echo "❌ ERROR: Failed to execute ${script}"
                     if (stopOnError) { error("SQL Execution stopped due to error in ${script}") }
+                } else {
+                    echo "✅ Success: ${script}"
                 }
+                echo "-----------------------------------"
             }
             echo "✅ SQL Execution Completed Successfully!"
         }
