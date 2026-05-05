@@ -1,53 +1,42 @@
 /**
- * SQL Executor (เหมือน GitHub Action: sql-execute-v1.yml)
- * 
- * วิธีเรียกใช้:
- * sqlExecute(
- *     dbName: 'TestGithubActions',
- *     projectName: 'TestGithubActions',
- *     scriptBranch: 'TestGithubActions-dev',
- *     credId: 'SQL_SERVER_CREDENTIALS' // ID ของ Username/Password ใน Jenkins
- * )
+ * SQL Executor (Remote SSH Version)
+ * รันบน Jenkins Linux -> สั่งงาน Windows ผ่าน SSH
  */
 def call(Map config = [:]) {
+    def host = config.host
+    def user = config.user
+    def sshCredId = config.sshCredId
     def dbName = config.dbName
-    def projectName = config.projectName
     def scriptBranch = config.scriptBranch ?: 'main'
-    def credId = config.credId
+    def dbCredId = config.dbCredId
     
-    echo "🔍 Starting SQL Execution for ${projectName} on DB ${dbName}..."
+    echo "🔍 Remote SQL Execution on ${host} (DB: ${dbName})"
 
-    // 1. Checkout Scripts จาก AdaScriptCenter
-    // หมายเหตุ: ใน Jenkins เราจะแยก Folder สคริปต์ออกมา
+    // 1. Checkout Scripts มาที่เครื่อง Jenkins (Linux)
     dir('temp-sql-scripts') {
         git(
             url: 'https://github.com/AdaSoftDevSecOps/AdaScriptCenter.git',
             branch: scriptBranch,
-            credentialsId: 'github-token-cred' // ต้องตั้งค่าใน Jenkins
+            credentialsId: 'github-token-cred'
         )
         
-        // 2. ตรวจสอบการเปลี่ยนแปลงไฟล์ (Logic เหมือนเดิม)
-        def hasChanges = true // ใน Jenkins เรามักจะรันตาม Trigger หรือใช้ความสามารถของ Plugin
-        
-        if (hasChanges) {
-            withCredentials([usernamePassword(credentialsId: credId, usernameVariable: 'SQL_USER', passwordVariable: 'SQL_PASS')]) {
-                powershell """
-                    $server = "${env.SQL_HOST},${env.SQL_PORT}"
-                    $db = "${dbName}"
+        // 2. ส่งไฟล์ SQL และรันผ่าน SSH
+        sshagent([sshCredId]) {
+            withCredentials([usernamePassword(credentialsId: dbCredId, usernameVariable: 'SQL_USER', passwordVariable: 'SQL_PASS')]) {
+                
+                // ตรวจสอบไฟล์ SQL และรันทีละไฟล์
+                def scripts = findFiles(glob: 'Script-StoreBack-*.sql')
+                scripts.each { script ->
+                    echo "🚀 Executing: ${script.name}"
                     
-                    Write-Host "Connecting to $db..."
+                    // ส่งไฟล์ไปที่เครื่อง Windows ก่อนรัน
+                    sh "scp -o StrictHostKeyChecking=no ${script.path} ${user}@${host}:C:/Windows/Temp/${script.name}"
                     
-                    # ตัวอย่างการรันไฟล์ SQL
-                    $scripts = Get-ChildItem -Filter "Script-StoreBack-*.sql"
-                    foreach ($s in $scripts) {
-                        Write-Host "Executing: $($s.Name)"
-                        sqlcmd -S $server -U $SQL_USER -P $SQL_PASS -d $db -i $s.FullName -b
-                        if ($LASTEXITCODE -ne 0) { throw "SQL Execution Failed at $($s.Name)" }
-                    }
-                """
+                    // แก้ไขตรงนี้: Escape $ เพื่อไม่ให้ Groovy ตีความผิด
+                    def psCommand = "sqlcmd -S ${host} -U ${SQL_USER} -P ${SQL_PASS} -d ${dbName} -i C:/Windows/Temp/${script.name} -b; Remove-Item C:/Windows/Temp/${script.name} -Force"
+                    sh "ssh -o StrictHostKeyChecking=no ${user}@${host} \"powershell -Command \\\"${psCommand}\\\"\""
+                }
             }
-        } else {
-            echo "⏭️ No SQL changes detected, skipping..."
         }
     }
 }
