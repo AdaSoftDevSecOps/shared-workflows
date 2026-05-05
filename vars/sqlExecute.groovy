@@ -1,5 +1,6 @@
 /**
- * SQL Executor (Remote SSH Version - Script-based V2)
+ * SQL Executor (Remote SSH Version - Script-based V3 - Base64 Robust)
+ * วิธีนี้ใช้ Base64 Encoding เพื่อเลี่ยงปัญหาอักขระพิเศษ 100%
  */
 def call(Map config = [:]) {
     def host = config.host
@@ -16,7 +17,7 @@ def call(Map config = [:]) {
     def sqlBackupPath = config.sqlBackupPath ?: 'C:/X-BACKUP/SQL'
     def stopOnError = config.stopOnError != null ? config.stopOnError : true
     
-    echo "🔍 SQL Execution (Robust Scripting) to ${sqlHost}:${sqlPort}"
+    echo "🔍 SQL Execution (Base64 Robust) to ${sqlHost}:${sqlPort}"
 
     dir('temp-sql-scripts') {
         git(url: 'https://github.com/AdaSoftDevSecOps/AdaScriptCenter.git', branch: scriptBranch, credentialsId: gitCredId)
@@ -33,25 +34,31 @@ def call(Map config = [:]) {
                     return
                 }
 
+                // เข้ารหัส Credentials และ Config เป็น Base64 เพื่อความปลอดภัยและเลี่ยงปัญหา Quotes
+                def encodedUser = SQL_USER.getBytes("UTF-8").encodeBase64().toString()
+                def encodedPass = SQL_PASS.getBytes("UTF-8").encodeBase64().toString()
+                def encodedScripts = foundScripts.join(',').getBytes("UTF-8").encodeBase64().toString()
                 def timestamp = new Date().format('yyyyMMdd_HHmmss', TimeZone.getTimeZone('Asia/Bangkok'))
                 
-                // ใช้ @' '@ (Here-String) เพื่อป้องกันอักขระพิเศษใน Password ทุกรูปแบบ
                 def psContent = """
                     \$ErrorActionPreference = "Stop"
                     
-                    # บันทึกรหัสผ่านลงตัวแปรแบบ Here-String (ปลอดภัยต่ออักขระพิเศษ)
-                    \$user = @'
-${SQL_USER}
-'@
-                    \$pass = @'
-${SQL_PASS}
-'@
+                    # ฟังก์ชันถอดรหัส Base64
+                    function Decode-Base64(\$base64) {
+                        return [System.Text.Encoding]::UTF8.GetString([System.Convert]::FromBase64String(\$base64))
+                    }
+
+                    # ถอดรหัส Credentials
+                    \$u = Decode-Base64 "${encodedUser}"
+                    \$p = Decode-Base64 "${encodedPass}"
+                    \$scriptList = Decode-Base64 "${encodedScripts}"
+                    \$foundScripts = \$scriptList.Split(',')
 
                     Write-Host "--- SQL Execution Task Start ---"
                     
                     # 1. Connection Verify
                     Write-Host "🔌 Verifying Connection..."
-                    sqlcmd -S ${sqlHost},${sqlPort} -U \$user -P \$pass -d ${dbName} -Q "SELECT 1" -b -W
+                    sqlcmd -S ${sqlHost},${sqlPort} -U \$u -P \$p -d ${dbName} -Q "SELECT 1" -b -W
                     if (\$LASTEXITCODE -ne 0) { throw "Connection Failed" }
 
                     # 2. Backup Database
@@ -61,18 +68,18 @@ ${SQL_PASS}
                         \$backupFile = "${dbName}_${timestamp}.bak"
                         \$backupDest = Join-Path \$backupDir \$backupFile
                         
-                        sqlcmd -S ${sqlHost},${sqlPort} -U \$user -P \$pass -Q "EXEC master.dbo.xp_create_subdir N'\$backupDir';" -b
+                        sqlcmd -S ${sqlHost},${sqlPort} -U \$u -P \$p -Q "EXEC master.dbo.xp_create_subdir N'\$backupDir';" -b
                         \$sqlBackup = "BACKUP DATABASE [${dbName}] TO DISK = N'\$backupDest' WITH INIT, COMPRESSION, CHECKSUM"
-                        sqlcmd -S ${sqlHost},${sqlPort} -U \$user -P \$pass -Q \$sqlBackup -b
+                        sqlcmd -S ${sqlHost},${sqlPort} -U \$u -P \$p -Q \$sqlBackup -b
                     }
 
                     # 3. Execute Scripts
                     Write-Host "🚀 Executing Scripts..."
-                    \$scripts = @(${foundScripts.collect { "'$it'" }.join(',')})
-                    foreach (\$s in \$scripts) {
+                    foreach (\$s in \$foundScripts) {
+                        if (-not \$s) { continue }
                         Write-Host "   Running: \$s"
                         \$fullPath = "C:/Windows/Temp/\$s"
-                        sqlcmd -S ${sqlHost},${sqlPort} -U \$user -P \$pass -d ${dbName} -i \$fullPath -f 65001 -b -r1
+                        sqlcmd -S ${sqlHost},${sqlPort} -U \$u -P \$p -d ${dbName} -i \$fullPath -f 65001 -b -r1
                         if (\$LASTEXITCODE -ne 0) { 
                             if ("${stopOnError}" -eq "true") { throw "Execution Failed at \$s" }
                             else { Write-Warning "Failed at \$s but continuing..." }
