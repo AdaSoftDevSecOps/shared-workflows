@@ -15,10 +15,10 @@ def call(Map config = [:]) {
     def projectName = config.projectName
     def scriptBranch = config.scriptBranch ?: 'main'
     def dbCredId = config.dbCredId
+    def gitCredId = config.gitCredId ?: 'github-token-cred'
     def backupEnabled = config.backupEnabled != null ? config.backupEnabled : true
-    def sqlBackupPath = config.sqlBackupPath ?: 'C:/X-BACKUP/SQL'
-    def stopOnError = config.stopOnError != null ? config.stopOnError : true
     
+    // ...
     echo "🔍 Remote SQL Execution from ${host} to DB Server: ${sqlHost}:${sqlPort} (DB: ${dbName})"
 
     // 1. Checkout Scripts มาที่เครื่อง Jenkins (Linux)
@@ -26,7 +26,7 @@ def call(Map config = [:]) {
         git(
             url: 'https://github.com/AdaSoftDevSecOps/AdaScriptCenter.git',
             branch: scriptBranch,
-            credentialsId: 'github-token-cred'
+            credentialsId: gitCredId
         )
         
         sshagent([sshCredId]) {
