@@ -8,7 +8,7 @@ def call(Map config = [:]) {
     def sshCredId = config.sshCredId
     
     // ตั้งค่าของ SQL Server แยกต่างหาก
-    def sqlHost = config.sqlHost ?: host // ถ้าไม่ระบุ ให้ใช้เครื่องเดียวกับ App
+    def sqlHost = config.sqlHost ?: host 
     def sqlPort = config.sqlPort ?: "1433"
     
     def dbName = config.dbName
@@ -52,9 +52,9 @@ def call(Map config = [:]) {
                     return
                 }
 
-                // 3. Verify SQL Connection (ใช้ Single Quote รอบ SQL Query เพื่อเลี่ยงปัญหา Quote ซ้อน)
+                // 3. Verify SQL Connection (ใช้ ${} เพื่อดึงค่าโดยตรง และครอบด้วย ' ' เพื่อความปลอดภัย)
                 echo "🔌 Verifying SQL Connection..."
-                def verifyCmd = "sqlcmd -S ${sqlHost},${sqlPort} -U \\\$SQL_USER -P \\\$SQL_PASS -d ${dbName} -Q 'SELECT 1' -W -h -1"
+                def verifyCmd = "sqlcmd -S ${sqlHost},${sqlPort} -U ${SQL_USER} -P '${SQL_PASS}' -d ${dbName} -Q 'SELECT 1' -W -h -1"
                 sh "ssh -o StrictHostKeyChecking=no ${user}@${host} \"powershell -Command \\\"${verifyCmd}\\\"\""
                 
                 // 4. Backup Database
@@ -65,9 +65,9 @@ def call(Map config = [:]) {
                         \$backupDir = Join-Path '${sqlBackupPath}' '${projectName}';
                         \$backupFile = '${dbName}_${timestamp}.bak';
                         \$backupDest = Join-Path \$backupDir \$backupFile;
-                        sqlcmd -S ${sqlHost},${sqlPort} -U \\\$SQL_USER -P \\\$SQL_PASS -Q "EXEC master.dbo.xp_create_subdir N'\$backupDir';";
+                        sqlcmd -S ${sqlHost},${sqlPort} -U ${SQL_USER} -P '${SQL_PASS}' -Q "EXEC master.dbo.xp_create_subdir N'\$backupDir';";
                         \$sql = 'BACKUP DATABASE [${dbName}] TO DISK = N\"'\$backupDest'\" WITH INIT, COMPRESSION, CHECKSUM';
-                        sqlcmd -S ${sqlHost},${sqlPort} -U \\\$SQL_USER -P \\\$SQL_PASS -Q \$sql -b;
+                        sqlcmd -S ${sqlHost},${sqlPort} -U ${SQL_USER} -P '${SQL_PASS}' -Q \$sql -b;
                     """.stripIndent().trim().replace('\n', ' ')
                     
                     sh "ssh -o StrictHostKeyChecking=no ${user}@${host} \"powershell -Command \\\"${psBackupCmd}\\\"\""
@@ -79,7 +79,7 @@ def call(Map config = [:]) {
                     echo "   Running: ${scriptName}"
                     sh "scp -o StrictHostKeyChecking=no ${scriptName} ${user}@${host}:C:/Windows/Temp/${scriptName}"
                     
-                    def psExecCmd = "sqlcmd -S ${sqlHost},${sqlPort} -U \\\$SQL_USER -P \\\$SQL_PASS -d ${dbName} -i C:/Windows/Temp/${scriptName} -f 65001 -b -r1"
+                    def psExecCmd = "sqlcmd -S ${sqlHost},${sqlPort} -U ${SQL_USER} -P '${SQL_PASS}' -d ${dbName} -i C:/Windows/Temp/${scriptName} -f 65001 -b -r1"
                     def status = sh(script: "ssh -o StrictHostKeyChecking=no ${user}@${host} \"powershell -Command \\\"${psExecCmd}\\\"\"", returnStatus: true)
                     
                     sh "ssh -o StrictHostKeyChecking=no ${user}@${host} \"powershell -Command \\\"Remove-Item C:/Windows/Temp/${scriptName} -Force\\\"\""
