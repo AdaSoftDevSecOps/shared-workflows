@@ -41,11 +41,19 @@ def call(Map config = [:]) {
             if (backupEnabled) {
                 echo "💾 Backing up Database [${dbName}]..."
                 def timestamp = new Date().format('yyyyMMdd_HHmmss', TimeZone.getTimeZone('Asia/Bangkok'))
-                def backupDest = "${sqlBackupPath}/${projectName}/${dbName}_${timestamp}.bak"
                 
-                def createDirSql = "EXEC master.dbo.xp_create_subdir N'${sqlBackupPath}/${projectName}';"
+                // ปรับ Path ให้เป็น Backslash (\) สำหรับ Windows
+                def winBackupPath = sqlBackupPath.replace('/', '\\')
+                def backupDir = "${winBackupPath}\\${projectName}"
+                def backupDest = "${backupDir}\\${dbName}_${timestamp}.bak"
+                
+                echo "   Backup Path: ${backupDest}"
+
+                // สร้าง Folder (สั่งผ่าน SQL)
+                def createDirSql = "EXEC master.dbo.xp_create_subdir N'${backupDir}';"
                 sh "${sqlcmd} -S ${sqlHost},${sqlPort} -U \$SQL_USER -P \$SQL_PASS -Q \"${createDirSql}\" -b -C"
                 
+                // สั่ง Backup
                 def backupSql = "BACKUP DATABASE [${dbName}] TO DISK = N'${backupDest}' WITH INIT, COMPRESSION, CHECKSUM"
                 sh "${sqlcmd} -S ${sqlHost},${sqlPort} -U \$SQL_USER -P \$SQL_PASS -Q \"${backupSql}\" -b -C"
             }
