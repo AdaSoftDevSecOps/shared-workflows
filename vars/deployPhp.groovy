@@ -27,11 +27,14 @@ def call(Map config = [:]) {
 
     sshagent([sshCredId]) {
         // --- Step 1: Packaging ---
-        echo "📦 Packaging project..."
+        echo "📦 Packaging project contents..."
         def excludeCmd = ""
-        excludeFolders.split(',').each { if(it) excludeCmd += " -x '${it}/*'" }
-        excludeFiles.split(',').each { if(it) excludeCmd += " -x '${it}'" }
-        sh "cd ${sourceSubfolder} && zip -r ${env.WORKSPACE}/project.zip ./* ${excludeCmd}"
+        // ปรับการ Exclude ให้รองรับทั้งไฟล์และโฟลเดอร์
+        excludeFolders.split(',').each { if(it) excludeCmd += " '${it}/*'" }
+        excludeFiles.split(',').each { if(it) excludeCmd += " '${it}'" }
+        
+        // ใช้ zip . -x เพื่อเอาเฉพาะเนื้อหาในโฟลเดอร์ปัจจุบัน
+        sh "zip -r ${env.WORKSPACE}/project.zip . -x ${excludeCmd}"
 
         // --- Step 2: Prepare Folder ---
         echo "📁 Preparing directories on Windows..."
@@ -43,38 +46,44 @@ def call(Map config = [:]) {
         def tempBackupDir = "C:\\Windows\\Temp\\deploy_backup_${timestamp}"
         def backupFile = "${backupPath}\\${projectName}_${timestamp}.zip"
         
-        // ถอด Comment ออกทั้งหมดเพื่อไม่ให้รบกวนการรันแบบบรรทัดเดียว
         def backupAndPreserveCmd = """
             \$ProgressPreference = 'SilentlyContinue';
-            New-Item -ItemType Directory -Path '${tempBackupDir}' -Force;
+            if(!(Test-Path '${tempBackupDir}')){ New-Item -ItemType Directory -Path '${tempBackupDir}' -Force };
+            
+            # สำรองไฟล์ที่ต้องการเก็บไว้ (Preserve Files)
             \$files = '${preserveFiles}'.Split(',');
             foreach(\$f in \$files) {
-                if(Test-Path '${deployPath}\\\$f'){ 
-                    Copy-Item '${deployPath}\\\$f' '${tempBackupDir}\\\$f' -Force;
-                    Copy-Item '${deployPath}\\\$f' '${configBackupPath}\\\$f' -Force;
+                if(\$f -and (Test-Path \"${deployPath}\\\$f\")){ 
+                    Copy-Item \"${deployPath}\\\$f\" \"${tempBackupDir}\\\$f\" -Force;
+                    Copy-Item \"${deployPath}\\\$f\" \"${configBackupPath}\\\$f\" -Force;
                 }
             };
+            
+            # สำรองโฟลเดอร์ที่ต้องการเก็บไว้ (Preserve Folders)
             \$folders = '${preserveFolders}'.Split(',');
             foreach(\$fd in \$folders) {
-                if(Test-Path '${deployPath}\\\$fd'){ 
-                    Copy-Item '${deployPath}\\\$fd' '${tempBackupDir}\\\$fd' -Recurse -Force;
+                if(\$fd -and (Test-Path \"${deployPath}\\\$fd\")){ 
+                    Copy-Item \"${deployPath}\\\$fd\" \"${tempBackupDir}\\\$fd\" -Recurse -Force;
                 }
             };
+
+            # ทำ Backup เวอร์ชันปัจจุบันทั้งหมดเก็บไว้เป็น ZIP
             if(Test-Path '${deployPath}'){
-                \$items = Get-ChildItem '${deployPath}';
+                \$items = Get-ChildItem '${deployPath}' -Exclude 'project.zip';
                 if(\$items.Count -gt 0){
-                    Compress-Archive -Path '${deployPath}\\*' -DestinationPath '${backupFile}' -Force;
+                    Compress-Archive -Path \"${deployPath}\\*\" -DestinationPath '${backupFile}' -Force;
                 }
             };
         """.stripIndent().trim().replace('\n', ' ')
         
-        // แก้ไขเรื่องการ Escape $ ให้เหลือชั้นเดียวสำหรับ sh
         sh "ssh -o StrictHostKeyChecking=no ${user}@${host} \"powershell -Command \\\"${backupAndPreserveCmd.replace('$', '\\$')}\\\"\""
 
         // --- Step 4: Deploy ---
         echo "🚚 Transferring and Extracting..."
+        // ลบไฟล์เดิมออกก่อน (ยกเว้น project.zip ที่กำลังจะส่งไป)
         sh "ssh -o StrictHostKeyChecking=no ${user}@${host} \"powershell -Command \\\"\\\$ProgressPreference = 'SilentlyContinue'; Get-ChildItem '${deployPath}' | Remove-Item -Recurse -Force\\\"\""
         sh "scp -o StrictHostKeyChecking=no ${env.WORKSPACE}/project.zip ${user}@${host}:'${deployPath}\\project.zip'"
+        // แตกไฟล์ลงที่ deployPath โดยตรง
         sh "ssh -o StrictHostKeyChecking=no ${user}@${host} \"powershell -Command \\\"\\\$ProgressPreference = 'SilentlyContinue'; Expand-Archive -Path '${deployPath}\\project.zip' -DestinationPath '${deployPath}' -Force; Remove-Item '${deployPath}\\project.zip' -Force\\\"\""
 
         // --- Step 5: Restore ---
@@ -93,6 +102,8 @@ def call(Map config = [:]) {
         sh "ssh -o StrictHostKeyChecking=no ${user}@${host} \"powershell -Command \\\"${cleanupCmd.replace('$', '\\$')}\\\"\""
         
         sh "rm -f ${env.WORKSPACE}/project.zip"
+        echo "🧹 Cleaning up Agent Workspace..."
+        deleteDir()
         echo "✅ Deployment Successful!"
     }
 }
