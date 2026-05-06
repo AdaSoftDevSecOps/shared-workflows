@@ -14,11 +14,12 @@ def call(Map config = [:]) {
     def sourceSubfolder = config.sourceSubfolder ?: '.'
     def backupKeepCount = config.backupKeepCount ?: 5
 
-    def preserveFiles = config.preserveFiles ?: 'config_deploy.php'
-    def preserveFolders = config.preserveFolders ?: 'Logs,uploads'
-
-    def excludeFiles = config.excludeFiles ?: 'config_deploy.php'
-    def excludeFolders = config.excludeFolders ?: 'Logs,uploads,.git,.github'
+    // Combined preserve/exclude items (Handles both files and folders)
+    def preserveItems = (config.preserveItems ?: "${config.preserveFiles ?: 'config_deploy.php'},${config.preserveFolders ?: 'Logs,uploads'}")
+                        .split(',').collect{ it.trim() }.unique().findAll{ it }.join(',')
+    
+    def excludeItems  = (config.excludeItems ?: "${config.excludeFiles ?: 'config_deploy.php'},${config.excludeFolders ?: 'Logs,uploads,.git,.github'}")
+                        .split(',').collect{ it.trim() }.unique().findAll{ it }.join(',')
 
     def date = new Date().format('yyyy-MM-dd_HHmm', TimeZone.getTimeZone('Asia/Bangkok'))
     def timestamp = "${env.BUILD_NUMBER}_${date}"
@@ -29,8 +30,12 @@ def call(Map config = [:]) {
         // --- Step 1: Packaging ---
         echo '📦 Packaging project contents (Excluding temp files)...'
         def excludeCmd = "-x 'project.zip' -x 'temp-sql-scripts*'"
-        excludeFolders.split(',').each { if (it) excludeCmd += " -x '${it}/*'" }
-        excludeFiles.split(',').each { if (it) excludeCmd += " -x '${it}'" }
+        excludeItems.split(',').each { 
+            if (it) {
+                excludeCmd += " -x '${it}'"
+                excludeCmd += " -x '${it}/*'"
+            }
+        }
         sh "zip -r ${env.WORKSPACE}/project.zip . ${excludeCmd}"
 
         // --- Step 2: Prepare Folder ---
@@ -51,21 +56,22 @@ def call(Map config = [:]) {
             \$ProgressPreference = 'SilentlyContinue';
             if(!(Test-Path '${tempBackupDir}')){ New-Item -ItemType Directory -Path '${tempBackupDir}' -Force };
             
-            \$files = '${preserveFiles}'.Split(',');
-            foreach(\$f in \$files) {
-                \$f = \$f.Trim();
-                if(\$f -and (Test-Path "${deployPath}\\\$f")){ 
-                    if(Test-Path "${configBackupPath}\\\$f" -PathType Container){ Remove-Item "${configBackupPath}\\\$f" -Recurse -Force }
-                    Copy-Item "${deployPath}\\\$f" "${tempBackupDir}\\\$f" -Force;
-                    Copy-Item "${deployPath}\\\$f" "${configBackupPath}\\\\" -Force;
-                }
-            };
-            
-            \$folders = '${preserveFolders}'.Split(',');
-            foreach(\$fd in \$folders) {
-                \$fd = \$fd.Trim();
-                if(\$fd -and (Test-Path "${deployPath}\\\$fd")){ 
-                    Copy-Item "${deployPath}\\\$fd" "${tempBackupDir}\\\$fd" -Recurse -Force;
+            \$items = '${preserveItems}'.Split(',');
+            foreach(\$i in \$items) {
+                \$i = \$i.Trim().Replace('/', '\\');
+                if(\$i -and (Test-Path "${deployPath}\\\$i")){ 
+                    \$dest = "${tempBackupDir}\\\$i";
+                    if(!(Test-Path (Split-Path \$dest))){ New-Item -ItemType Directory -Path (Split-Path \$dest) -Force };
+                    
+                    // Backup to temp dir (Recursive for folders)
+                    Copy-Item "${deployPath}\\\$i" \$dest -Recurse -Force;
+
+                    // If it's a file, also backup to ConfigFile folder
+                    if(!(Test-Path "${deployPath}\\\$i" -PathType Container)){
+                        if(Test-Path "${configBackupPath}" -PathType Container){
+                            Copy-Item "${deployPath}\\\$i" "${configBackupPath}\\\\" -Force;
+                        }
+                    }
                 }
             };
 
