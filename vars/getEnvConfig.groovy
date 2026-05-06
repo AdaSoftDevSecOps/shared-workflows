@@ -17,12 +17,24 @@ def call(String envName) {
             baseBackupPath: 'C:/X-BACKUP/AdaStoreBack'
         ],
         'SIT': [
+            host         : '192.168.0.134',
+            user         : 'Administrator',
+            sshCredId    : 'windows-ssh-key',
+            sqlHost      : '27.254.239.244',
+            sqlPort      : '33435',
+            dbCredId     : 'sql-sit-creds',
+            gitCredId    : 'AdaDevSecOps',
+            sqlBackupPath: 'C:/X-BACKUP/SQL',
+            baseDeployPath: 'C:/WebServer/Apache24/htdocs',
+            baseBackupPath: 'C:/X-BACKUP/AdaStoreBack'
+        ],
+        'UAT': [
             host         : '192.168.0.127',
             user         : 'Administrator',
-            sshCredId    : 'windows-ssh-key-sit',
+            sshCredId    : 'windows-ssh-key',
             sqlHost      : '27.254.239.245',
             sqlPort      : '33433',
-            dbCredId     : 'sql-sit-creds',
+            dbCredId     : 'sql-uat-creds',
             gitCredId    : 'AdaDevSecOps',
             sqlBackupPath: 'D:/X-BACKUP/SQL',
             baseDeployPath: 'D:/WebServer/Apache24/htdocs',
@@ -31,7 +43,7 @@ def call(String envName) {
         'PROD': [
             host         : '192.168.0.200',
             user         : 'Administrator',
-            sshCredId    : 'windows-ssh-key-prod',
+            sshCredId    : 'windows-ssh-key',
             sqlHost      : '27.254.239.245',
             sqlPort      : '33433',
             dbCredId     : 'sql-prod-creds',
