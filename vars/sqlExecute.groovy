@@ -70,6 +70,36 @@ def call(Map config = [:]) {
                     def backupSql = "BACKUP DATABASE [${dbName}] TO DISK = N'${backupDest}' WITH INIT, COMPRESSION, CHECKSUM"
                     sh "${sqlcmd} -S ${sqlHost},${sqlPort} -U \$SQL_USER -P \$SQL_PASS -Q \"${backupSql}\" -b -C"
 
+                    // --- [ADD NEW] Verify Backup ---
+                    echo "🔍 Verifying Backup integrity..."
+                    def verifySql = """
+                        DECLARE @file_exists INT;
+                        CREATE TABLE #file_check (exists_bit INT, is_directory INT, parent_directory_exists INT);
+                        INSERT INTO #file_check EXEC master.dbo.xp_fileexist N'${backupDest}';
+                        SELECT @file_exists = exists_bit FROM #file_check;
+                        DROP TABLE #file_check;
+
+                        IF @file_exists = 1
+                        BEGIN
+                            PRINT '✅ File exists. Verifying integrity...';
+                            RESTORE VERIFYONLY FROM DISK = N'${backupDest}';
+                            PRINT '✅ Backup is valid.';
+                        END
+                        ELSE
+                        BEGIN
+                            RAISERROR('❌ ERROR: Backup file not found after backup operation!', 16, 1);
+                        END
+                    """.stripIndent().trim()
+                    
+                    def verifyStatus = sh(
+                        script: "${sqlcmd} -S ${sqlHost},${sqlPort} -U \$SQL_USER -P \$SQL_PASS -Q \"${verifySql}\" -b -C",
+                        returnStatus: true
+                    )
+
+                    if (verifyStatus != 0) {
+                        error("❌ Database Backup Verification FAILED for [${dbName}]. Stopping process to prevent data loss.")
+                    }
+
                     // 5. Cleanup Old Backups (ใช้ xp_cmdshell โดยผ่านไฟล์ SQL เพื่อเลี่ยงปัญหา Quoting)
                     if (backupKeepCount > 0) {
                         echo "🧹 Cleaning up old backups in ${backupDir} (Keeping top ${backupKeepCount})..."

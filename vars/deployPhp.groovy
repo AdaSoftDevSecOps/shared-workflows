@@ -147,26 +147,47 @@ def call(Map config = [:]) {
         
         sh "ssh -o StrictHostKeyChecking=no ${user}@${host} powershell -EncodedCommand ${backupAndPreserveCmd.getBytes('UTF-16LE').encodeBase64().toString()}"
 
-        // --- Step 4: Deploy ---
-        echo '🚚 Transferring and Extracting...'
-        if (deployMode == 'full') {
-            echo '🧹 Mode: FULL - Cleaning destination directory...'
-            def cleanCmd = "Get-ChildItem '${deployPath}' | Remove-Item -Recurse -Force"
-            sh "ssh -o StrictHostKeyChecking=no ${user}@${host} powershell -EncodedCommand ${cleanCmd.getBytes('UTF-16LE').encodeBase64().toString()}"
-        }
-        sh "scp -o StrictHostKeyChecking=no ${env.WORKSPACE}/project.zip ${user}@${host}:'${deployPath}\\project.zip'"
-        def extractCmd = "Expand-Archive -Path '${deployPath}\\project.zip' -DestinationPath '${deployPath}' -Force; Remove-Item '${deployPath}\\project.zip' -Force"
-        sh "ssh -o StrictHostKeyChecking=no ${user}@${host} powershell -EncodedCommand ${extractCmd.getBytes('UTF-16LE').encodeBase64().toString()}"
+        // --- Step 4: Deploy & Step 5: Restore (Wrapped in Try-Catch for Rollback) ---
+        try {
+            echo '🚚 Transferring and Extracting...'
+            if (deployMode == 'full') {
+                echo '🧹 Mode: FULL - Cleaning destination directory...'
+                def cleanCmd = "Get-ChildItem '${deployPath}' | Remove-Item -Recurse -Force"
+                sh "ssh -o StrictHostKeyChecking=no ${user}@${host} powershell -EncodedCommand ${cleanCmd.getBytes('UTF-16LE').encodeBase64().toString()}"
+            }
+            sh "scp -o StrictHostKeyChecking=no ${env.WORKSPACE}/project.zip ${user}@${host}:'${deployPath}\\project.zip'"
+            def extractCmd = "Expand-Archive -Path '${deployPath}\\project.zip' -DestinationPath '${deployPath}' -Force; Remove-Item '${deployPath}\\project.zip' -Force"
+            sh "ssh -o StrictHostKeyChecking=no ${user}@${host} powershell -EncodedCommand ${extractCmd.getBytes('UTF-16LE').encodeBase64().toString()}"
 
-        // --- Step 5: Restore ---
-        if (deployMode == 'full') {
-            echo '🔄 Restoring preserved files...'
-            def restoreCmd = "if(Test-Path '${tempBackupDir}'){ Copy-Item '${tempBackupDir}\\*' '${deployPath}' -Recurse -Force; Remove-Item '${tempBackupDir}' -Recurse -Force }"
-            sh "ssh -o StrictHostKeyChecking=no ${user}@${host} powershell -EncodedCommand ${restoreCmd.getBytes('UTF-16LE').encodeBase64().toString()}"
-        } else {
-            // In FAST mode, just cleanup the temp directory used for selective backup
-            def cleanupTempCmd = "if(Test-Path '${tempBackupDir}'){ Remove-Item '${tempBackupDir}' -Recurse -Force }"
-            sh "ssh -o StrictHostKeyChecking=no ${user}@${host} powershell -EncodedCommand ${cleanupTempCmd.getBytes('UTF-16LE').encodeBase64().toString()}"
+            if (deployMode == 'full') {
+                echo '🔄 Restoring preserved files...'
+                def restoreCmd = "if(Test-Path '${tempBackupDir}'){ Copy-Item '${tempBackupDir}\\*' '${deployPath}' -Recurse -Force; Remove-Item '${tempBackupDir}' -Recurse -Force }"
+                sh "ssh -o StrictHostKeyChecking=no ${user}@${host} powershell -EncodedCommand ${restoreCmd.getBytes('UTF-16LE').encodeBase64().toString()}"
+            } else {
+                def cleanupTempCmd = "if(Test-Path '${tempBackupDir}'){ Remove-Item '${tempBackupDir}' -Recurse -Force }"
+                sh "ssh -o StrictHostKeyChecking=no ${user}@${host} powershell -EncodedCommand ${cleanupTempCmd.getBytes('UTF-16LE').encodeBase64().toString()}"
+            }
+        } catch (Exception e) {
+            echo "❌ ERROR detected during deployment: ${e.message}"
+            echo "🛡️ Initiating Automated Rollback..."
+            
+            def rollbackCmd = """
+                \$ProgressPreference = 'SilentlyContinue';
+                if(Test-Path "${backupFile}") {
+                    echo "🔄 Restoring from backup: ${backupFile}";
+                    # 1. Clean current broken state
+                    Get-ChildItem "${deployPath}" | Remove-Item -Recurse -Force;
+                    # 2. Extract backup
+                    Expand-Archive -Path "${backupFile}" -DestinationPath "${deployPath}" -Force;
+                    echo "✅ Rollback completed successfully.";
+                } else {
+                    echo "⚠️ Rollback failed: Backup file not found.";
+                }
+                if(Test-Path "${tempBackupDir}"){ Remove-Item "${tempBackupDir}" -Recurse -Force };
+            """.stripIndent().trim()
+            
+            sh "ssh -o StrictHostKeyChecking=no ${user}@${host} powershell -EncodedCommand ${rollbackCmd.getBytes('UTF-16LE').encodeBase64().toString()}"
+            error("Deployment failed and was rolled back: ${e.message}")
         }
 
         // --- Step 6: Cleanup ---
