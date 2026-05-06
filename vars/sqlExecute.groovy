@@ -25,19 +25,19 @@ def call(Map config = [:]) {
         try {
             git(url: 'https://github.com/AdaSoftDevSecOps/AdaScriptCenter.git', branch: scriptBranch, credentialsId: gitCredId)
             
-            def targetScripts = ["Script-StoreBack-Structure.sql", "Script-StoreBack-Stored.sql", "Script-StoreBack-Data.sql"]
+            def targetScripts = ['Script-StoreBack-Structure.sql', 'Script-StoreBack-Stored.sql', 'Script-StoreBack-Data.sql']
             def foundScripts = []
             targetScripts.each { if (fileExists(it)) { foundScripts << it } }
 
             if (foundScripts.isEmpty()) {
-                echo "⏭️ No SQL scripts found. Skipping."
+                echo '⏭️ No SQL scripts found. Skipping.'
                 return
             }
 
             withCredentials([usernamePassword(credentialsId: dbCredId, usernameVariable: 'SQL_USER', passwordVariable: 'SQL_PASS')]) {
                 
                 // 3. Verify Connection (เพิ่ม -C)
-                echo "🔌 Verifying Connection..."
+                echo '🔌 Verifying Connection...'
                 sh "${sqlcmd} -S ${sqlHost},${sqlPort} -U \$SQL_USER -P \$SQL_PASS -d ${dbName} -Q 'SELECT 1' -b -W -C"
 
                 // 4. Backup Database
@@ -64,7 +64,7 @@ def call(Map config = [:]) {
                     if (backupKeepCount > 0) {
                         echo "🧹 Cleaning up old backups in ${backupDir} (Keeping top ${backupKeepCount})..."
                         
-                        def cleanupFile = "cleanup_backup.sql"
+                        def cleanupFile = 'cleanup_backup.sql'
                         def cleanupCmd = "powershell.exe -Command \"Get-ChildItem -Path '${backupDir}' -Filter '${dbName}_*.bak' | Sort-Object CreationTime -Descending | Select-Object -Skip ${backupKeepCount} | Remove-Item -Force\""
                         
                         writeFile file: cleanupFile, text: "EXEC xp_cmdshell '${cleanupCmd}';", encoding: 'UTF-8'
@@ -76,8 +76,8 @@ def call(Map config = [:]) {
 
                 // 6. Execute Scripts
                 if (useTransaction) {
-                    echo "🚀 Executing all scripts in a single Transaction (All-or-Nothing)..."
-                    def masterFile = "master_deploy.sql"
+                    echo '🚀 Executing all scripts in a single Transaction (All-or-Nothing)...'
+                    def masterFile = 'master_deploy.sql'
                     def masterContent = """
                         SET NOCOUNT OFF;
                         SET QUOTED_IDENTIFIER ON;
@@ -103,13 +103,13 @@ def call(Map config = [:]) {
                     )
 
                     if (status != 0) {
-                        echo "❌ ERROR: SQL Execution failed. Changes have been rolled back automatically."
-                        if (stopOnError) { error("SQL Execution failed in Transactional mode.") }
+                        echo '❌ ERROR: SQL Execution failed. Changes have been rolled back automatically.'
+                        if (stopOnError) { error('SQL Execution failed in Transactional mode.') }
                     } else {
-                        echo "✅ SQL Execution Completed Successfully!"
+                        echo '✅ SQL Execution Completed Successfully!'
                     }
                 } else {
-                    echo "🚀 Executing Scripts one by one..."
+                    echo '🚀 Executing Scripts one by one...'
                     foundScripts.each { script ->
                         echo "--- [RUNNING] ${script} ---"
                         def status = sh(
@@ -123,13 +123,13 @@ def call(Map config = [:]) {
                         } else {
                             echo "✅ Success: ${script}"
                         }
-                        echo "-----------------------------------"
+                        echo '-----------------------------------'
                     }
-                    echo "✅ SQL Execution Completed Successfully!"
+                    echo '✅ SQL Execution Completed Successfully!'
                 }
             }
         } finally {
-            echo "🧹 Cleaning up SQL temp folder on Agent..."
+            echo '🧹 Cleaning up SQL temp folder on Agent...'
             deleteDir()
         }
     }
