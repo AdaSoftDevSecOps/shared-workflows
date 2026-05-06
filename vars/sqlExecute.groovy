@@ -59,15 +59,17 @@ def call(Map config = [:]) {
                 def backupSql = "BACKUP DATABASE [${dbName}] TO DISK = N'${backupDest}' WITH INIT, COMPRESSION, CHECKSUM"
                 sh "${sqlcmd} -S ${sqlHost},${sqlPort} -U \$SQL_USER -P \$SQL_PASS -Q \"${backupSql}\" -b -C"
 
-                // 5. Cleanup Old Backups (ใช้ xp_cmdshell ตามเดิม)
+                // 5. Cleanup Old Backups (ใช้ xp_cmdshell โดยผ่านไฟล์ SQL เพื่อเลี่ยงปัญหา Quoting)
                 if (backupKeepCount > 0) {
                     echo "🧹 Cleaning up old backups in ${backupDir} (Keeping top ${backupKeepCount})..."
-                    // ใช้ PowerShell ผ่าน xp_cmdshell (ต้องมั่นใจว่าเปิดใช้งาน xp_cmdshell บน SQL Server)
-                    def cleanupCmd = "powershell.exe -Command \"Get-ChildItem -Path '${backupDir}' -Filter '${dbName}_*.bak' | Sort-Object CreationTime -Descending | Select-Object -Skip ${backupKeepCount} | Remove-Item -Force\""
-                    def cleanupSql = "EXEC xp_cmdshell '${cleanupCmd}'"
                     
-                    // รันโดยไม่ใส่ -b เพื่อไม่ให้ Build Fail ถ้า xp_cmdshell ปิดอยู่
-                    sh "${sqlcmd} -S ${sqlHost},${sqlPort} -U \$SQL_USER -P \$SQL_PASS -Q \"${cleanupSql}\" -C"
+                    def cleanupFile = "cleanup_backup.sql"
+                    def cleanupCmd = "powershell.exe -Command \"Get-ChildItem -Path '${backupDir}' -Filter '${dbName}_*.bak' | Sort-Object CreationTime -Descending | Select-Object -Skip ${backupKeepCount} | Remove-Item -Force\""
+                    
+                    writeFile file: cleanupFile, text: "EXEC xp_cmdshell '${cleanupCmd}';", encoding: 'UTF-8'
+                    
+                    // รันโดยไม่ใส่ -b เพื่อไม่ให้ Build Fail ถ้าไม่ได้เปิด xp_cmdshell
+                    sh "${sqlcmd} -S ${sqlHost},${sqlPort} -U \$SQL_USER -P \$SQL_PASS -i ${cleanupFile} -C"
                 }
             }
 
