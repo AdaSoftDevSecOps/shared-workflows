@@ -54,31 +54,31 @@ def call(Map config = [:]) {
         
         def backupAndPreserveCmd = """
             \$ProgressPreference = 'SilentlyContinue';
-            if(!(Test-Path '${tempBackupDir}')){ New-Item -ItemType Directory -Path '${tempBackupDir}' -Force };
+            if(!(Test-Path "${tempBackupDir}")){ New-Item -ItemType Directory -Path "${tempBackupDir}" -Force };
             
-            \$items = '${preserveItems}'.Split(',');
+            \$items = "${preserveItems}".Split(',');
             foreach(\$i in \$items) {
                 \$i = \$i.Trim().Replace('/', '\\');
-                if(\$i -and (Test-Path "${deployPath}\\\$i")){ 
-                    \$dest = "${tempBackupDir}\\\$i";
-                    if(!(Test-Path (Split-Path \$dest))){ New-Item -ItemType Directory -Path (Split-Path \$dest) -Force };
+                \$src = Join-Path "${deployPath}" \$i;
+                if(\$i -and (Test-Path \$src)){ 
+                    \$dest = Join-Path "${tempBackupDir}" \$i;
+                    \$parent = Split-Path \$dest;
+                    if(!(Test-Path \$parent)){ New-Item -ItemType Directory -Path \$parent -Force };
                     
-                    // Backup to temp dir (Recursive for folders)
-                    Copy-Item "${deployPath}\\\$i" \$dest -Recurse -Force;
+                    Copy-Item \$src \$dest -Recurse -Force;
 
-                    // If it's a file, also backup to ConfigFile folder
-                    if(!(Test-Path "${deployPath}\\\$i" -PathType Container)){
+                    if(!(Test-Path \$src -PathType Container)){
                         if(Test-Path "${configBackupPath}" -PathType Container){
-                            Copy-Item "${deployPath}\\\$i" "${configBackupPath}\\\\" -Force;
+                            Copy-Item \$src "${configBackupPath}\\" -Force;
                         }
                     }
                 }
             };
 
-            if(Test-Path '${deployPath}'){
-                \$items = Get-ChildItem '${deployPath}' -Exclude 'project.zip';
+            if(Test-Path "${deployPath}"){
+                \$items = Get-ChildItem "${deployPath}" -Exclude "project.zip";
                 if(\$items.Count -gt 0){
-                    Compress-Archive -Path "${deployPath}\\*" -DestinationPath '${backupFile}' -Force;
+                    Compress-Archive -Path "${deployPath}\\*" -DestinationPath "${backupFile}" -Force;
                 }
             };
         """.stripIndent().trim()
