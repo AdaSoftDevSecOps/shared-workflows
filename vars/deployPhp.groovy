@@ -77,7 +77,7 @@ def call(Map config = [:]) {
             };
         """.stripIndent().trim().replace('\n', ' ')
         
-        sh "ssh -o StrictHostKeyChecking=no ${user}@${host} \"powershell -Command \\\"${backupAndPreserveCmd.replace('$', '\\$')}\\\"\""
+        sh "ssh -o StrictHostKeyChecking=no ${user}@${host} \"powershell -Command \\\"${backupAndPreserveCmd.replace('$', '\\$').replace('"', '\\\"')}\\\"\""
 
         // --- Step 4: Deploy ---
         echo "🚚 Transferring and Extracting..."
@@ -100,7 +100,7 @@ def call(Map config = [:]) {
                 \$backups | Select-Object -Skip ${backupKeepCount} | Remove-Item -Force;
             };
         """.stripIndent().trim().replace('\n', ' ')
-        sh "ssh -o StrictHostKeyChecking=no ${user}@${host} \"powershell -Command \\\"${cleanupCmd.replace('$', '\\$')}\\\"\""
+        sh "ssh -o StrictHostKeyChecking=no ${user}@${host} \"powershell -Command \\\"${cleanupCmd.replace('$', '\\$').replace('"', '\\\"')}\\\"\""
         
         sh "rm -f ${env.WORKSPACE}/project.zip"
         echo "🧹 Cleaning up Agent Workspace..."
