@@ -39,15 +39,25 @@ def call(Map config = [:]) {
     sshagent([sshCredId]) {
         // --- Step 1: Packaging ---
         if (deployMode == 'fast') {
-            echo '🔍 Mode: FAST - Detecting changed files from git...'
+            echo '🔍 Mode: FAST - Detecting changed files since last successful deployment...'
             try {
-                changedFilesStr = sh(script: "git diff --name-only HEAD~1 HEAD", returnStdout: true).trim().replace('\n', ' ')
-                if (!changedFilesStr) {
-                    echo "⚠️ No changes detected in the last commit. Falling back to FULL mode."
+                def lastSuccess = env.GIT_PREVIOUS_SUCCESSFUL_COMMIT
+                def currentCommit = env.GIT_COMMIT
+
+                if (lastSuccess && currentCommit) {
+                    echo "   Comparing: ${lastSuccess} -> ${currentCommit}"
+                    changedFilesStr = sh(script: "git diff --name-only ${lastSuccess} ${currentCommit}", returnStdout: true).trim().replace('\n', ' ')
+                } else {
+                    echo "⚠️ No previous successful commit found (First build?). Falling back to FULL mode."
+                    deployMode = 'full'
+                }
+
+                if (deployMode == 'fast' && !changedFilesStr) {
+                    echo "⚠️ No changes detected between commits. Falling back to FULL mode."
                     deployMode = 'full'
                 }
             } catch (Exception e) {
-                echo "⚠️ Error detecting git changes: ${e.message}. Falling back to FULL mode."
+                echo "⚠️ Error detecting git diff: ${e.message}. Falling back to FULL mode."
                 deployMode = 'full'
             }
         }
