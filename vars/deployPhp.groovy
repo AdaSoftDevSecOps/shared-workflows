@@ -45,6 +45,10 @@ def call(Map config = [:]) {
                 def currentCommit = env.GIT_COMMIT
 
                 if (lastSuccess && currentCommit) {
+                    if (lastSuccess == currentCommit) {
+                        echo "⏭️ PHP Fast Mode: Current commit is identical to last successful deployment. Skipping deployment."
+                        return
+                    }
                     echo "   Comparing: ${lastSuccess} -> ${currentCommit}"
                     changedFilesStr = sh(script: "git diff --name-only ${lastSuccess} ${currentCommit}", returnStdout: true).trim().replace('\n', ' ')
                 } else {
@@ -53,8 +57,8 @@ def call(Map config = [:]) {
                 }
 
                 if (deployMode == 'fast' && !changedFilesStr) {
-                    echo "⚠️ No changes detected between commits. Falling back to FULL mode."
-                    deployMode = 'full'
+                    echo "⏭️ PHP Fast Mode: No file changes detected between commits. Skipping deployment."
+                    return
                 }
             } catch (Exception e) {
                 echo "⚠️ Error detecting git diff: ${e.message}. Falling back to FULL mode."
