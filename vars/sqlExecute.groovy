@@ -77,10 +77,11 @@ def call(Map config = [:]) {
                         def cleanupFile = 'cleanup_backup.sql'
                         def cleanupCmd = "powershell.exe -Command \"Get-ChildItem -Path '${backupDir}' -Filter '${dbName}_*.bak' | Sort-Object CreationTime -Descending | Select-Object -Skip ${backupKeepCount} | Remove-Item -Force\""
                         
-                        writeFile file: cleanupFile, text: "EXEC xp_cmdshell '${cleanupCmd}';", encoding: 'UTF-8'
+                        // ต้องเปลี่ยน ' เป็น '' เพื่อให้ SQL string ทำงานได้ถูกต้อง
+                        writeFile file: cleanupFile, text: "EXEC xp_cmdshell '${cleanupCmd.replace("'", "''")}';", encoding: 'UTF-8'
                         
-                        // รันโดยไม่ใส่ -b เพื่อไม่ให้ Build Fail ถ้าไม่ได้เปิด xp_cmdshell
-                        sh "${sqlcmd} -S ${sqlHost},${sqlPort} -U \$SQL_USER -P \$SQL_PASS -i ${cleanupFile} -C"
+                        // รันโดยไม่ใส่ -b เพื่อไม่ให้ Build Fail ถ้าไม่ได้เปิด xp_cmdshell และระบุ code page UTF-8
+                        sh "${sqlcmd} -S ${sqlHost},${sqlPort} -U \$SQL_USER -P \$SQL_PASS -i ${cleanupFile} -f 65001 -C"
                     }
                 }
 
