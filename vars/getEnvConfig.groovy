@@ -12,27 +12,33 @@ def call(String envName) {
             sqlPort      : '33433',
             dbCredId     : 'sql-dev-creds',
             gitCredId    : 'AdaDevSecOps',
-            sqlBackupPath: 'C:/X-BACKUP/SQL'
+            sqlBackupPath: 'C:/X-BACKUP/SQL',
+            baseDeployPath: 'C:/WebServer/Apache24/htdocs',
+            baseBackupPath: 'C:/X-BACKUP/AdaStoreBack'
         ],
         'SIT': [
-            host         : '192.168.0.127', // ตัวอย่าง
+            host         : '192.168.0.127',
             user         : 'Administrator',
             sshCredId    : 'windows-ssh-key-sit',
             sqlHost      : '27.254.239.245',
             sqlPort      : '33433',
             dbCredId     : 'sql-sit-creds',
             gitCredId    : 'AdaDevSecOps',
-            sqlBackupPath: 'C:/X-BACKUP/SQL'
+            sqlBackupPath: 'D:/X-BACKUP/SQL',
+            baseDeployPath: 'D:/WebServer/Apache24/htdocs',
+            baseBackupPath: 'D:/X-BACKUP/AdaStoreBack'
         ],
         'PROD': [
-            host         : '192.168.0.200', // ตัวอย่าง
+            host         : '192.168.0.200',
             user         : 'Administrator',
             sshCredId    : 'windows-ssh-key-prod',
             sqlHost      : '27.254.239.245',
             sqlPort      : '33433',
             dbCredId     : 'sql-prod-creds',
             gitCredId    : 'AdaDevSecOps',
-            sqlBackupPath: 'C:/X-BACKUP/SQL'
+            sqlBackupPath: 'E:/X-BACKUP/SQL',
+            baseDeployPath: 'E:/App/Production',
+            baseBackupPath: 'E:/X-BACKUP/Production'
         ]
     ]
 
