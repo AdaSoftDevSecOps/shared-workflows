@@ -61,16 +61,17 @@ def call(Map config = [:]) {
                 \$i = \$i.Trim().Replace('/', '\\');
                 \$src = Join-Path "${deployPath}" \$i;
                 if(\$i -and (Test-Path \$src)){ 
+                    # 1. Temporary Backup (for restoration after cleaning)
                     \$dest = Join-Path "${tempBackupDir}" \$i;
-                    \$parent = Split-Path \$dest;
-                    if(!(Test-Path \$parent)){ New-Item -ItemType Directory -Path \$parent -Force };
-                    
+                    if(!(Test-Path (Split-Path \$dest))){ New-Item -ItemType Directory -Path (Split-Path \$dest) -Force };
                     Copy-Item \$src \$dest -Recurse -Force;
 
-                    if(!(Test-Path \$src -PathType Container)){
-                        if(Test-Path "${configBackupPath}" -PathType Container){
-                            Copy-Item \$src "${configBackupPath}\\" -Force;
-                        }
+                    # 2. Persistent Backup (ConfigFile folder)
+                    if(Test-Path "${configBackupPath}" -PathType Container){
+                        \$cfDest = Join-Path "${configBackupPath}" \$i;
+                        if(Test-Path \$cfDest){ Remove-Item \$cfDest -Recurse -Force };
+                        if(!(Test-Path (Split-Path \$cfDest))){ New-Item -ItemType Directory -Path (Split-Path \$cfDest) -Force };
+                        Copy-Item \$src \$cfDest -Recurse -Force;
                     }
                 }
             };
