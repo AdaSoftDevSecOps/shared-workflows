@@ -13,6 +13,7 @@ def call(Map config = [:]) {
     def backupEnabled = config.backupEnabled != null ? config.backupEnabled : true
     def sqlBackupPath = config.sqlBackupPath ?: 'C:/X-BACKUP/SQL'
     def backupKeepCount = config.backupKeepCount != null ? config.backupKeepCount.toInteger() : 5
+    def useTransaction = config.useTransaction != null ? config.useTransaction : true
     def stopOnError = config.stopOnError != null ? config.stopOnError : true
     
     // กำหนด Path ของ sqlcmd ให้แน่นอน
@@ -71,24 +72,58 @@ def call(Map config = [:]) {
             }
 
             // 6. Execute Scripts
-            echo "🚀 Executing Scripts..."
-            foundScripts.each { script ->
-                echo "--- [RUNNING] ${script} ---"
-                // รันจากไฟล์ใน Workspace ของ Linux ได้เลย
+            if (useTransaction) {
+                echo "🚀 Executing all scripts in a single Transaction (All-or-Nothing)..."
+                def masterFile = "master_deploy.sql"
+                def masterContent = """
+                    SET NOCOUNT OFF;
+                    SET QUOTED_IDENTIFIER ON;
+                    SET ANSI_NULLS ON;
+                    SET XACT_ABORT ON;
+                    BEGIN TRANSACTION;
+                    GO
+                """.stripIndent().trim() + "\n"
+
+                foundScripts.each { script ->
+                    masterContent += "PRINT '--- [RUNNING] ${script} ---';\n"
+                    masterContent += "GO\n"
+                    masterContent += ":r ${script}\n"
+                    masterContent += "GO\n"
+                }
+                masterContent += "COMMIT TRANSACTION;\nPRINT '✅ All scripts committed successfully.';\nGO\n"
+                
+                writeFile file: masterFile, text: masterContent, encoding: 'UTF-8'
+
                 def status = sh(
-                    script: "${sqlcmd} -S ${sqlHost},${sqlPort} -U \$SQL_USER -P \$SQL_PASS -d ${dbName} -i ${script} -f 65001 -b -r1 -C",
+                    script: "${sqlcmd} -S ${sqlHost},${sqlPort} -U \$SQL_USER -P \$SQL_PASS -d ${dbName} -i ${masterFile} -f 65001 -b -C -m -1",
                     returnStatus: true
                 )
-                
+
                 if (status != 0) {
-                    echo "❌ ERROR: Failed to execute ${script}"
-                    if (stopOnError) { error("SQL Execution stopped due to error in ${script}") }
+                    echo "❌ ERROR: SQL Execution failed. Changes have been rolled back automatically."
+                    if (stopOnError) { error("SQL Execution failed in Transactional mode.") }
                 } else {
-                    echo "✅ Success: ${script}"
+                    echo "✅ SQL Execution Completed Successfully!"
                 }
-                echo "-----------------------------------"
+            } else {
+                echo "🚀 Executing Scripts one by one..."
+                foundScripts.each { script ->
+                    echo "--- [RUNNING] ${script} ---"
+                    def status = sh(
+                        script: "${sqlcmd} -S ${sqlHost},${sqlPort} -U \$SQL_USER -P \$SQL_PASS -d ${dbName} -i ${script} -f 65001 -b -r1 -C",
+                        returnStatus: true
+                    )
+                    
+                    if (status != 0) {
+                        echo "❌ ERROR: Failed to execute ${script}"
+                        if (stopOnError) { error("SQL Execution stopped due to error in ${script}") }
+                    } else {
+                        echo "✅ Success: ${script}"
+                    }
+                    echo "-----------------------------------"
+                }
+                echo "✅ SQL Execution Completed Successfully!"
             }
-            echo "✅ SQL Execution Completed Successfully!"
         }
     }
 }
