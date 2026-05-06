@@ -3,6 +3,14 @@
  * Jenkins (Linux) -> Windows Server via SSH/SCP
  */
 def call(Map config = [:]) {
+    // 1. Load Environment Defaults if specified
+    if (config.envName) {
+        def envDefaults = getEnvConfig(config.envName)
+        config.host = config.host ?: envDefaults.host
+        config.user = config.user ?: envDefaults.user
+        config.sshCredId = config.sshCredId ?: envDefaults.sshCredId
+    }
+
     def host = config.host
     def user = config.user
     def sshCredId = config.sshCredId

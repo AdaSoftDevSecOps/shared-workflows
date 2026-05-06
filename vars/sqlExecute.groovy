@@ -3,6 +3,16 @@
  * รันคำสั่ง sqlcmd จากเครื่อง Jenkins (Linux) โดยใช้ Full Path และรองรับ v18
  */
 def call(Map config = [:]) {
+    // 1. Load Environment Defaults if specified
+    if (config.envName) {
+        def envDefaults = getEnvConfig(config.envName)
+        config.sqlHost = config.sqlHost ?: envDefaults.sqlHost
+        config.sqlPort = config.sqlPort ?: envDefaults.sqlPort
+        config.dbCredId = config.dbCredId ?: envDefaults.dbCredId
+        config.gitCredId = config.gitCredId ?: envDefaults.gitCredId
+        config.sqlBackupPath = config.sqlBackupPath ?: envDefaults.sqlBackupPath
+    }
+
     def sqlHost = config.sqlHost ?: config.host
     def sqlPort = config.sqlPort ?: "1433"
     def dbName = config.dbName
