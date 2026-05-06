@@ -51,21 +51,16 @@ def call(Map config = [:]) {
             \$ProgressPreference = 'SilentlyContinue';
             if(!(Test-Path '${tempBackupDir}')){ New-Item -ItemType Directory -Path '${tempBackupDir}' -Force };
             
-            # สำรองไฟล์ที่ต้องการเก็บไว้ (Preserve Files)
             \$files = '${preserveFiles}'.Split(',');
             foreach(\$f in \$files) {
                 \$f = \$f.Trim();
                 if(\$f -and (Test-Path \"${deployPath}\\\$f\")){ 
-                    # ป้องกันกรณีที่ปลายทางเคยเป็นโฟลเดอร์ที่ผิดพลาดมาจากการรันครั้งก่อน
                     if(Test-Path \"${configBackupPath}\\\$f\" -PathType Container){ Remove-Item \"${configBackupPath}\\\$f\" -Recurse -Force }
-                    
                     Copy-Item \"${deployPath}\\\$f\" \"${tempBackupDir}\\\$f\" -Force;
-                    # Copy ไปยัง ConfigFile (ใช้เครื่องหมาย \\\\ เพื่อบอกว่าเป็น directory ปลายทาง)
                     Copy-Item \"${deployPath}\\\$f\" \"${configBackupPath}\\\\\\\" -Force;
                 }
             };
             
-            # สำรองโฟลเดอร์ที่ต้องการเก็บไว้ (Preserve Folders)
             \$folders = '${preserveFolders}'.Split(',');
             foreach(\$fd in \$folders) {
                 \$fd = \$fd.Trim();
@@ -74,7 +69,6 @@ def call(Map config = [:]) {
                 }
             };
 
-            # ทำ Backup เวอร์ชันปัจจุบันทั้งหมดเก็บไว้เป็น ZIP
             if(Test-Path '${deployPath}'){
                 \$items = Get-ChildItem '${deployPath}' -Exclude 'project.zip';
                 if(\$items.Count -gt 0){
