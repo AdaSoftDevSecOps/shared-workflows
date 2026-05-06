@@ -12,6 +12,7 @@ def call(Map config = [:]) {
     def gitCredId = config.gitCredId ?: 'github-token-cred'
     def backupEnabled = config.backupEnabled != null ? config.backupEnabled : true
     def sqlBackupPath = config.sqlBackupPath ?: 'C:/X-BACKUP/SQL'
+    def backupKeepCount = config.backupKeepCount != null ? config.backupKeepCount.toInteger() : 5
     def stopOnError = config.stopOnError != null ? config.stopOnError : true
     
     // กำหนด Path ของ sqlcmd ให้แน่นอน
@@ -56,9 +57,20 @@ def call(Map config = [:]) {
                 // สั่ง Backup
                 def backupSql = "BACKUP DATABASE [${dbName}] TO DISK = N'${backupDest}' WITH INIT, COMPRESSION, CHECKSUM"
                 sh "${sqlcmd} -S ${sqlHost},${sqlPort} -U \$SQL_USER -P \$SQL_PASS -Q \"${backupSql}\" -b -C"
+
+                // 5. Cleanup Old Backups (ใช้ xp_cmdshell ตามเดิม)
+                if (backupKeepCount > 0) {
+                    echo "🧹 Cleaning up old backups in ${backupDir} (Keeping top ${backupKeepCount})..."
+                    // ใช้ PowerShell ผ่าน xp_cmdshell (ต้องมั่นใจว่าเปิดใช้งาน xp_cmdshell บน SQL Server)
+                    def cleanupCmd = "powershell.exe -Command \"Get-ChildItem -Path '${backupDir}' -Filter '${dbName}_*.bak' | Sort-Object CreationTime -Descending | Select-Object -Skip ${backupKeepCount} | Remove-Item -Force\""
+                    def cleanupSql = "EXEC xp_cmdshell '${cleanupCmd}'"
+                    
+                    // รันโดยไม่ใส่ -b เพื่อไม่ให้ Build Fail ถ้า xp_cmdshell ปิดอยู่
+                    sh "${sqlcmd} -S ${sqlHost},${sqlPort} -U \$SQL_USER -P \$SQL_PASS -Q \"${cleanupSql}\" -C"
+                }
             }
 
-            // 5. Execute Scripts
+            // 6. Execute Scripts
             echo "🚀 Executing Scripts..."
             foundScripts.each { script ->
                 echo "--- [RUNNING] ${script} ---"
