@@ -35,12 +35,23 @@ def call(Map config = [:]) {
         try {
             git(url: 'https://github.com/AdaSoftDevSecOps/AdaScriptCenter.git', branch: scriptBranch, credentialsId: gitCredId)
             
+            // --- [ADD NEW] SQL Fast Mode Logic ---
+            def lastSqlCommitFile = "${env.WORKSPACE}/.last_sql_commit_${projectName}"
+            def currentSqlCommit = sh(script: "git rev-parse HEAD", returnStdout: true).trim()
+            def previousSqlCommit = fileExists(lastSqlCommitFile) ? readFile(lastSqlCommitFile).trim() : null
+
+            if (currentSqlCommit == previousSqlCommit) {
+                echo "⏭️ SQL Fast Mode: No changes detected in SQL scripts (${currentSqlCommit}). Skipping execution."
+                return
+            }
+            echo "🔍 SQL Changes detected or first run. (New: ${currentSqlCommit}, Prev: ${previousSqlCommit ?: 'None'})"
+
             def targetScripts = ['Script-StoreBack-Structure.sql', 'Script-StoreBack-Stored.sql', 'Script-StoreBack-Data.sql']
             def foundScripts = []
             targetScripts.each { if (fileExists(it)) { foundScripts << it } }
 
             if (foundScripts.isEmpty()) {
-                echo '⏭️ No SQL scripts found. Skipping.'
+                echo '⏭️ No SQL scripts found in repository. Skipping.'
                 return
             }
 
@@ -148,6 +159,8 @@ def call(Map config = [:]) {
                         if (stopOnError) { error('SQL Execution failed in Transactional mode.') }
                     } else {
                         echo '✅ SQL Execution Completed Successfully!'
+                        // บันทึกความสำเร็จลงไฟล์เพื่อให้ครั้งหน้าข้ามได้
+                        writeFile file: lastSqlCommitFile, text: currentSqlCommit
                     }
                 } else {
                     echo '🚀 Executing Scripts one by one...'
@@ -167,6 +180,8 @@ def call(Map config = [:]) {
                         echo '-----------------------------------'
                     }
                     echo '✅ SQL Execution Completed Successfully!'
+                    // บันทึกความสำเร็จลงไฟล์เพื่อให้ครั้งหน้าข้ามได้
+                    writeFile file: lastSqlCommitFile, text: currentSqlCommit
                 }
             }
         } finally {
