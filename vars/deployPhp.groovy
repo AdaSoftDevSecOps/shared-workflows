@@ -31,20 +31,41 @@ def call(Map config = [:]) {
 
     def date = new Date().format('yyyy-MM-dd_HHmm', TimeZone.getTimeZone('Asia/Bangkok'))
     def timestamp = "${env.BUILD_NUMBER}_${date}"
+    def deployMode = (config.deployMode ?: 'full').toLowerCase()
+    def changedFilesStr = ""
 
-    echo "🚀 Starting Deployment for ${projectName} to ${host}"
+    echo "🚀 Starting Deployment for ${projectName} to ${host} (Mode: ${deployMode})"
 
     sshagent([sshCredId]) {
         // --- Step 1: Packaging ---
-        echo '📦 Packaging project contents (Excluding temp files)...'
-        def excludeCmd = "-x 'project.zip' -x 'temp-sql-scripts*'"
-        excludeItems.split(',').each { 
-            if (it) {
-                excludeCmd += " -x '${it}'"
-                excludeCmd += " -x '${it}/*'"
+        if (deployMode == 'fast') {
+            echo '🔍 Mode: FAST - Detecting changed files from git...'
+            try {
+                changedFilesStr = sh(script: "git diff --name-only HEAD~1 HEAD", returnStdout: true).trim().replace('\n', ' ')
+                if (!changedFilesStr) {
+                    echo "⚠️ No changes detected in the last commit. Falling back to FULL mode."
+                    deployMode = 'full'
+                }
+            } catch (Exception e) {
+                echo "⚠️ Error detecting git changes: ${e.message}. Falling back to FULL mode."
+                deployMode = 'full'
             }
         }
-        sh "zip -r ${env.WORKSPACE}/project.zip . ${excludeCmd}"
+
+        if (deployMode == 'fast') {
+            echo "📦 Packaging only changed files: ${changedFilesStr}"
+            sh "zip -r ${env.WORKSPACE}/project.zip ${changedFilesStr}"
+        } else {
+            echo '📦 Packaging project contents (Full)...'
+            def excludeCmd = "-x 'project.zip' -x 'temp-sql-scripts*'"
+            excludeItems.split(',').each { 
+                if (it) {
+                    excludeCmd += " -x '${it}'"
+                    excludeCmd += " -x '${it}/*'"
+                }
+            }
+            sh "zip -r ${env.WORKSPACE}/project.zip . ${excludeCmd}"
+        }
 
         // --- Step 2: Prepare Folder ---
         echo '📁 Preparing directories on Windows...'
@@ -56,56 +77,87 @@ def call(Map config = [:]) {
         sh "ssh -o StrictHostKeyChecking=no ${user}@${host} powershell -EncodedCommand ${prepCmd.getBytes('UTF-16LE').encodeBase64().toString()}"
 
         // --- Step 3: Backup & Preserve ---
-        echo '💾 Preserving files & backing up current version...'
+        echo "💾 Preserving items (Mode: ${deployMode})..."
         def tempBackupDir = "C:\\Windows\\Temp\\deploy_backup_${timestamp}"
         def backupFile = "${backupPath}\\${projectName}_${timestamp}.zip"
+        def changedFilesCsv = changedFilesStr.replace(' ', ',')
         
         def backupAndPreserveCmd = """
             \$ProgressPreference = 'SilentlyContinue';
             if(!(Test-Path "${tempBackupDir}")){ New-Item -ItemType Directory -Path "${tempBackupDir}" -Force };
             
-            \$items = "${preserveItems}".Split(',');
-            foreach(\$i in \$items) {
+            # 1. Preserve Items (Config Backup)
+            \$pItems = "${preserveItems}".Split(',');
+            foreach(\$i in \$pItems) {
                 \$i = \$i.Trim().Replace('/', '\\');
                 \$src = Join-Path "${deployPath}" \$i;
                 if(\$i -and (Test-Path \$src)){ 
-                    # 1. Temporary Backup (for restoration after cleaning)
-                    \$dest = Join-Path "${tempBackupDir}" \$i;
-                    if(!(Test-Path (Split-Path \$dest))){ New-Item -ItemType Directory -Path (Split-Path \$dest) -Force };
-                    Copy-Item \$src \$dest -Recurse -Force;
-
-                    # 2. Persistent Backup (ConfigFile folder)
+                    # Persistent Backup
                     if(Test-Path "${configBackupPath}" -PathType Container){
                         \$cfDest = Join-Path "${configBackupPath}" \$i;
                         if(Test-Path \$cfDest){ Remove-Item \$cfDest -Recurse -Force };
                         if(!(Test-Path (Split-Path \$cfDest))){ New-Item -ItemType Directory -Path (Split-Path \$cfDest) -Force };
                         Copy-Item \$src \$cfDest -Recurse -Force;
                     }
+                    # Temp Backup for Full Restore
+                    if("${deployMode}" -eq "full") {
+                        \$dest = Join-Path "${tempBackupDir}" \$i;
+                        if(!(Test-Path (Split-Path \$dest))){ New-Item -ItemType Directory -Path (Split-Path \$dest) -Force };
+                        Copy-Item \$src \$dest -Recurse -Force;
+                    }
                 }
             };
 
-            if(Test-Path "${deployPath}"){
-                \$items = Get-ChildItem "${deployPath}" -Exclude "project.zip";
-                if(\$items.Count -gt 0){
-                    Compress-Archive -Path "${deployPath}\\*" -DestinationPath "${backupFile}" -Force;
+            # 2. Deployment Backup
+            if("${deployMode}" -eq "fast") {
+                \$changedFiles = "${changedFilesCsv}".Split(',');
+                \$backedCount = 0;
+                foreach(\$f in \$changedFiles) {
+                    \$f = \$f.Trim().Replace('/', '\\');
+                    \$src = Join-Path "${deployPath}" \$f;
+                    if(\$f -and (Test-Path \$src -PathType Leaf)) {
+                        \$dest = Join-Path "${tempBackupDir}" \$f;
+                        if(!(Test-Path (Split-Path \$dest))){ New-Item -ItemType Directory -Path (Split-Path \$dest) -Force };
+                        Copy-Item \$src \$dest -Force;
+                        \$backedCount++;
+                    }
                 }
-            };
+                if(\$backedCount -gt 0) {
+                    Compress-Archive -Path "${tempBackupDir}\\*" -DestinationPath "${backupFile}" -Force;
+                }
+            } else {
+                if(Test-Path "${deployPath}"){
+                    \$items = Get-ChildItem "${deployPath}" -Exclude "project.zip";
+                    if(\$items.Count -gt 0){
+                        Compress-Archive -Path "${deployPath}\\*" -DestinationPath "${backupFile}" -Force;
+                    }
+                };
+            }
         """.stripIndent().trim()
         
         sh "ssh -o StrictHostKeyChecking=no ${user}@${host} powershell -EncodedCommand ${backupAndPreserveCmd.getBytes('UTF-16LE').encodeBase64().toString()}"
 
         // --- Step 4: Deploy ---
         echo '🚚 Transferring and Extracting...'
-        def cleanCmd = "Get-ChildItem '${deployPath}' | Remove-Item -Recurse -Force"
-        sh "ssh -o StrictHostKeyChecking=no ${user}@${host} powershell -EncodedCommand ${cleanCmd.getBytes('UTF-16LE').encodeBase64().toString()}"
+        if (deployMode == 'full') {
+            echo '🧹 Mode: FULL - Cleaning destination directory...'
+            def cleanCmd = "Get-ChildItem '${deployPath}' | Remove-Item -Recurse -Force"
+            sh "ssh -o StrictHostKeyChecking=no ${user}@${host} powershell -EncodedCommand ${cleanCmd.getBytes('UTF-16LE').encodeBase64().toString()}"
+        }
         sh "scp -o StrictHostKeyChecking=no ${env.WORKSPACE}/project.zip ${user}@${host}:'${deployPath}\\project.zip'"
         def extractCmd = "Expand-Archive -Path '${deployPath}\\project.zip' -DestinationPath '${deployPath}' -Force; Remove-Item '${deployPath}\\project.zip' -Force"
         sh "ssh -o StrictHostKeyChecking=no ${user}@${host} powershell -EncodedCommand ${extractCmd.getBytes('UTF-16LE').encodeBase64().toString()}"
 
         // --- Step 5: Restore ---
-        echo '🔄 Restoring preserved files...'
-        def restoreCmd = "if(Test-Path '${tempBackupDir}'){ Copy-Item '${tempBackupDir}\\*' '${deployPath}' -Recurse -Force; Remove-Item '${tempBackupDir}' -Recurse -Force }"
-        sh "ssh -o StrictHostKeyChecking=no ${user}@${host} powershell -EncodedCommand ${restoreCmd.getBytes('UTF-16LE').encodeBase64().toString()}"
+        if (deployMode == 'full') {
+            echo '🔄 Restoring preserved files...'
+            def restoreCmd = "if(Test-Path '${tempBackupDir}'){ Copy-Item '${tempBackupDir}\\*' '${deployPath}' -Recurse -Force; Remove-Item '${tempBackupDir}' -Recurse -Force }"
+            sh "ssh -o StrictHostKeyChecking=no ${user}@${host} powershell -EncodedCommand ${restoreCmd.getBytes('UTF-16LE').encodeBase64().toString()}"
+        } else {
+            // In FAST mode, just cleanup the temp directory used for selective backup
+            def cleanupTempCmd = "if(Test-Path '${tempBackupDir}'){ Remove-Item '${tempBackupDir}' -Recurse -Force }"
+            sh "ssh -o StrictHostKeyChecking=no ${user}@${host} powershell -EncodedCommand ${cleanupTempCmd.getBytes('UTF-16LE').encodeBase64().toString()}"
+        }
 
         // --- Step 6: Cleanup ---
         echo '🧹 Cleaning up old backups...'
