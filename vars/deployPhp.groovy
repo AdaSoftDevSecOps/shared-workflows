@@ -27,14 +27,15 @@ def call(Map config = [:]) {
 
     sshagent([sshCredId]) {
         // --- Step 1: Packaging ---
-        echo "📦 Packaging project contents..."
-        def excludeCmd = ""
-        // ปรับการ Exclude ให้รองรับทั้งไฟล์และโฟลเดอร์
-        excludeFolders.split(',').each { if(it) excludeCmd += " '${it}/*'" }
-        excludeFiles.split(',').each { if(it) excludeCmd += " '${it}'" }
+        echo "📦 Packaging project contents (Excluding temp files)..."
+        // กำหนดการ Exclude พื้นฐาน: project.zip เอง และ temp folders จาก sqlExecute
+        def excludeCmd = "-x 'project.zip' -x 'temp-sql-scripts*'"
         
-        // ใช้ zip . -x เพื่อเอาเฉพาะเนื้อหาในโฟลเดอร์ปัจจุบัน
-        sh "zip -r ${env.WORKSPACE}/project.zip . -x ${excludeCmd}"
+        excludeFolders.split(',').each { if(it) excludeCmd += " -x '${it}/*'" }
+        excludeFiles.split(',').each { if(it) excludeCmd += " -x '${it}'" }
+        
+        // บีบอัดไฟล์ทั้งหมดใน workspace ยกเว้นตัวที่ exclude
+        sh "zip -r ${env.WORKSPACE}/project.zip . ${excludeCmd}"
 
         // --- Step 2: Prepare Folder ---
         echo "📁 Preparing directories on Windows..."
@@ -53,15 +54,21 @@ def call(Map config = [:]) {
             # สำรองไฟล์ที่ต้องการเก็บไว้ (Preserve Files)
             \$files = '${preserveFiles}'.Split(',');
             foreach(\$f in \$files) {
+                \$f = \$f.Trim();
                 if(\$f -and (Test-Path \"${deployPath}\\\$f\")){ 
+                    # ป้องกันกรณีที่ปลายทางเคยเป็นโฟลเดอร์ที่ผิดพลาดมาจากการรันครั้งก่อน
+                    if(Test-Path \"${configBackupPath}\\\$f\" -PathType Container){ Remove-Item \"${configBackupPath}\\\$f\" -Recurse -Force }
+                    
                     Copy-Item \"${deployPath}\\\$f\" \"${tempBackupDir}\\\$f\" -Force;
-                    Copy-Item \"${deployPath}\\\$f\" \"${configBackupPath}\\\$f\" -Force;
+                    # Copy ไปยัง ConfigFile (ใช้เครื่องหมาย \\\\ เพื่อบอกว่าเป็น directory ปลายทาง)
+                    Copy-Item \"${deployPath}\\\$f\" \"${configBackupPath}\\\\\\\" -Force;
                 }
             };
             
             # สำรองโฟลเดอร์ที่ต้องการเก็บไว้ (Preserve Folders)
             \$folders = '${preserveFolders}'.Split(',');
             foreach(\$fd in \$folders) {
+                \$fd = \$fd.Trim();
                 if(\$fd -and (Test-Path \"${deployPath}\\\$fd\")){ 
                     Copy-Item \"${deployPath}\\\$fd\" \"${tempBackupDir}\\\$fd\" -Recurse -Force;
                 }
