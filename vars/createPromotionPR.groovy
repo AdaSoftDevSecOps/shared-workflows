@@ -36,6 +36,10 @@ def call(Map params = [:]) {
 
             // 3. เตรียมข้อมูล Git
             echo "📡 [PR Manager] กำลังดึงข้อมูลจากกิ่ง ${targetBranch}..."
+            
+            // ป้องกันปัญหา .git หายไปจาก Workspace (กู้คืน Metadata ของ Git)
+            checkout scm
+            
             sh "git -c url.\"https://${G_TOKEN}@github.com/\".insteadOf=\"https://github.com/\" fetch origin ${targetBranch} --depth=100"
             
             def commitCountStr = sh(script: "git log FETCH_HEAD..HEAD --oneline --no-merges | wc -l", returnStdout: true).trim()
