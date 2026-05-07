@@ -30,7 +30,8 @@ def call(Map params = [:]) {
         echo "🎯 [PR Manager] เป้าหมาย: [${currentEnv} -> ${nextEnv}] กิ่ง: ${targetBranch}"
 
         // 2. ใช้ Credentials และเริ่มการทำงานกับ GitHub
-        withCredentials([string(credentialsId: githubCredId, variable: 'G_TOKEN')]) {
+        // ปรับให้รองรับ 'Username with password' (โดยใช้ password เป็น token)
+        withCredentials([usernamePassword(credentialsId: githubCredId, usernameVariable: 'G_USER', passwordVariable: 'G_TOKEN')]) {
             // ตั้งค่า Environment Variable สำหรับ gh cli
             env.GH_TOKEN = G_TOKEN
             env.GITHUB_TOKEN = G_TOKEN
