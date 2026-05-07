@@ -1,6 +1,6 @@
 /**
  * vars/createPromotionPR.groovy
- * เวอร์ชันปรับปรุง: เพิ่ม Error Handling และ Debug Logging
+ * เวอร์ชันปรับปรุง: ใช้ Body-File เพื่อรองรับข้อความหลายบรรทัดอย่างสมบูรณ์
  */
 def call(Map params = [:]) {
     def projectName = params.get('projectName', 'Project')
@@ -8,7 +8,7 @@ def call(Map params = [:]) {
     def githubCredId = params.get('githubCredId', 'AdaDevSecOps')
     
     try {
-        // 1. ตรวจสอบ Environment ปัจจุบัน
+        // 1. ตรวจสอบ Environment
         def currentEnv = getEnvironmentByBranch(branchMapping)
         def currentBranch = env.BRANCH_NAME
         def targetBranch = ""
@@ -29,25 +29,13 @@ def call(Map params = [:]) {
 
         echo "🎯 [PR Manager] เป้าหมาย: [${currentEnv} -> ${nextEnv}] กิ่ง: ${targetBranch}"
 
-        // 2. ใช้ Credentials และเริ่มการทำงานกับ GitHub
-        // ปรับให้รองรับ 'Username with password' (โดยใช้ password เป็น token)
+        // 2. ใช้ Credentials
         withCredentials([usernamePassword(credentialsId: githubCredId, usernameVariable: 'G_USER', passwordVariable: 'G_TOKEN')]) {
-            // ตั้งค่า Environment Variable สำหรับ gh cli
             env.GH_TOKEN = G_TOKEN
             env.GITHUB_TOKEN = G_TOKEN
 
-            echo "🔍 [PR Manager] ตรวจสอบความพร้อมของระบบ..."
-            
-            // เช็กว่ามี gh cli ไหม
-            def hasGH = sh(script: "gh --version", returnStatus: true) == 0
-            if (!hasGH) {
-                echo "❌ [PR Manager] ไม่พบคำสั่ง 'gh' ในเครื่อง Jenkins Server. กรุณาติดตั้ง GitHub CLI."
-                return
-            }
-
-            // 3. เตรียมข้อมูล Git (ดึงข้อมูลกิ่งปลายทางมาเทียบ)
+            // 3. เตรียมข้อมูล Git
             echo "📡 [PR Manager] กำลังดึงข้อมูลจากกิ่ง ${targetBranch}..."
-            // ใช้ -c เพื่อส่ง Token เข้าไปเฉพาะคำสั่งนี้ ปลอดภัยและไม่ค้างในระบบ
             sh "git -c url.\"https://${G_TOKEN}@github.com/\".insteadOf=\"https://github.com/\" fetch origin ${targetBranch} --depth=100"
             
             def commitCountStr = sh(script: "git log FETCH_HEAD..HEAD --oneline --no-merges | wc -l", returnStdout: true).trim()
@@ -64,9 +52,10 @@ def call(Map params = [:]) {
             def latestSha = sh(script: "git rev-parse --short HEAD", returnStdout: true).trim()
             def firstAuthor = sh(script: "git log FETCH_HEAD..HEAD --no-merges --reverse -1 --pretty=%an", returnStdout: true).trim()
             
-            // 4. สร้าง PR Body
+            // 4. สร้าง PR Body (เขียนลงไฟล์เพื่อป้องกัน Shell Error)
             def prBody = """
 ## 🚀 Promotion Request: ${projectName}
+
 | รายละเอียด | ข้อมูล |
 |-----------|--------|
 | **โปรเจกต์** | ${projectName} |
@@ -75,13 +64,24 @@ def call(Map params = [:]) {
 | **จำนวน Commits** | ${commitCount} |
 | **ผู้พัฒนาเบื้องต้น** | ${firstAuthor} |
 
+---
+
 ### 📝 รายการ Commit:
 ```text
 ${commitList}
 ```
-*🤖 สร้างโดย Jenkins Shared Library*
+
+---
+
+### ✅ ขั้นตอนถัดไป:
+1. 🔍 Review โค้ดใน PR นี้
+2. 👍 Approve และ Merge เพื่อ Deploy ไปยัง **${nextEnv}**
+
+*🤖 สร้าง/อัปเดตอัตโนมัติโดย Jenkins Shared Library*
 """.trim()
 
+            // เขียน Body ลงไฟล์ชั่วคราว
+            writeFile file: 'pr_body.txt', text: prBody
             def prTitle = "[${projectName}] Promotion: ${currentEnv} -> ${nextEnv} (${commitCount} commits)"
 
             // 5. ตรวจสอบและจัดการ PR
@@ -90,17 +90,20 @@ ${commitList}
 
             if (existingPR && existingPR != "null" && existingPR != "") {
                 echo "🔄 [PR Manager] อัปเดต PR #${existingPR}..."
-                sh "gh pr edit ${existingPR} --title \"${prTitle}\" --body \"${prBody}\""
-                sh "gh pr comment ${existingPR} --body \"📌 **Jenkins Update**: พบโค้ดใหม่ (${commitCount} รายการ)\""
+                sh "gh pr edit ${existingPR} --title \"${prTitle}\" --body-file pr_body.txt"
+                sh "gh pr comment ${existingPR} --body \"📌 **Jenkins Update**: พบโค้ดใหม่ (${commitCount} รายการ) พร้อมสำหรับการส่งงานต่อ\""
                 echo "✅ [PR Manager] อัปเดตสำเร็จ"
             } else {
                 echo "✨ [PR Manager] สร้าง PR ใหม่..."
-                def prUrl = sh(script: "gh pr create --base \"${targetBranch}\" --head \"${currentBranch}\" --title \"${prTitle}\" --body \"${prBody}\" --label \"auto-promotion\"", returnStdout: true).trim()
+                // ใช้ --body-file แทนการส่ง String ตรงๆ
+                def prUrl = sh(script: "gh pr create --base \"${targetBranch}\" --head \"${currentBranch}\" --title \"${prTitle}\" --body-file pr_body.txt", returnStdout: true).trim()
                 echo "✅ [PR Manager] สร้างสำเร็จ: ${prUrl}"
             }
+            
+            // ลบไฟล์ชั่วคราวหลังใช้งานเสร็จ
+            sh "rm -f pr_body.txt"
         }
     } catch (Exception e) {
-        // สำคัญ: เราไม่ปล่อยให้ Error ตรงนี้ไปขัดจังหวะ Build หลัก
         echo "❌ [PR Manager] เกิดข้อผิดพลาดในการจัดการ PR: ${e.message}"
         echo "⚠️ การสร้าง PR ไม่สำเร็จ แต่ระบบจะดำเนินการต่อไป..."
     }
