@@ -47,7 +47,8 @@ def call(Map params = [:]) {
 
             // 3. เตรียมข้อมูล Git (ดึงข้อมูลกิ่งปลายทางมาเทียบ)
             echo "📡 [PR Manager] กำลังดึงข้อมูลจากกิ่ง ${targetBranch}..."
-            sh "git fetch origin ${targetBranch} --depth=100"
+            // ใช้ -c เพื่อส่ง Token เข้าไปเฉพาะคำสั่งนี้ ปลอดภัยและไม่ค้างในระบบ
+            sh "git -c url.\"https://${G_TOKEN}@github.com/\".insteadOf=\"https://github.com/\" fetch origin ${targetBranch} --depth=100"
             
             def commitCountStr = sh(script: "git log origin/${targetBranch}..HEAD --oneline --no-merges | wc -l", returnStdout: true).trim()
             int commitCount = commitCountStr.toInteger()
