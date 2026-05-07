@@ -50,7 +50,7 @@ def call(Map params = [:]) {
             // ใช้ -c เพื่อส่ง Token เข้าไปเฉพาะคำสั่งนี้ ปลอดภัยและไม่ค้างในระบบ
             sh "git -c url.\"https://${G_TOKEN}@github.com/\".insteadOf=\"https://github.com/\" fetch origin ${targetBranch} --depth=100"
             
-            def commitCountStr = sh(script: "git log origin/${targetBranch}..HEAD --oneline --no-merges | wc -l", returnStdout: true).trim()
+            def commitCountStr = sh(script: "git log FETCH_HEAD..HEAD --oneline --no-merges | wc -l", returnStdout: true).trim()
             int commitCount = commitCountStr.toInteger()
             
             if (commitCount == 0) {
@@ -60,9 +60,9 @@ def call(Map params = [:]) {
 
             echo "📊 [PR Manager] พบ ${commitCount} commits ใหม่"
 
-            def commitList = sh(script: "git log origin/${targetBranch}..HEAD --oneline --no-merges", returnStdout: true).trim()
+            def commitList = sh(script: "git log FETCH_HEAD..HEAD --oneline --no-merges", returnStdout: true).trim()
             def latestSha = sh(script: "git rev-parse --short HEAD", returnStdout: true).trim()
-            def firstAuthor = sh(script: "git log origin/${targetBranch}..HEAD --no-merges --reverse -1 --pretty=%an", returnStdout: true).trim()
+            def firstAuthor = sh(script: "git log FETCH_HEAD..HEAD --no-merges --reverse -1 --pretty=%an", returnStdout: true).trim()
             
             // 4. สร้าง PR Body
             def prBody = """
