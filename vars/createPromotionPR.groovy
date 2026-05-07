@@ -94,13 +94,13 @@ ${commitList}
 
             if (existingPR && existingPR != "null" && existingPR != "") {
                 echo "🔄 [PR Manager] อัปเดต PR #${existingPR}..."
-                sh "gh pr edit ${existingPR} --title \"${prTitle}\" --body-file pr_body.txt"
-                sh "gh pr comment ${existingPR} --body \"📌 **Jenkins Update**: พบโค้ดใหม่ (${commitCount} รายการ) พร้อมสำหรับการส่งงานต่อ\""
+                sh "gh pr edit '${existingPR}' --title '${prTitle}' --body-file pr_body.txt"
+                sh "gh pr comment '${existingPR}' --body '📌 **Jenkins Update**: พบโค้ดใหม่ (${commitCount} รายการ) พร้อมสำหรับการส่งงานต่อ'"
                 echo "✅ [PR Manager] อัปเดตสำเร็จ"
             } else {
                 echo "✨ [PR Manager] สร้าง PR ใหม่..."
                 // ใช้ --body-file แทนการส่ง String ตรงๆ
-                def prUrl = sh(script: "gh pr create --base \"${targetBranch}\" --head \"${currentBranch}\" --title \"${prTitle}\" --body-file pr_body.txt", returnStdout: true).trim()
+                def prUrl = sh(script: "gh pr create --base '${targetBranch}' --head '${currentBranch}' --title '${prTitle}' --body-file pr_body.txt", returnStdout: true).trim()
                 echo "✅ [PR Manager] สร้างสำเร็จ: ${prUrl}"
             }
             
