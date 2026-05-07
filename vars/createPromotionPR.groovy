@@ -1,6 +1,6 @@
 /**
  * vars/createPromotionPR.groovy
- * เวอร์ชันปรับปรุง: ใช้ Body-File เพื่อรองรับข้อความหลายบรรทัดอย่างสมบูรณ์
+ * เวอร์ชันปรับปรุง: ใช้ Environment Variables เพื่อความปลอดภัยสูงสุดในการส่งค่าไปยัง Shell
  */
 def call(Map params = [:]) {
     def projectName = params.get('projectName', 'Project')
@@ -37,7 +37,7 @@ def call(Map params = [:]) {
             // 3. เตรียมข้อมูล Git
             echo "📡 [PR Manager] กำลังดึงข้อมูลจากกิ่ง ${targetBranch}..."
             
-            // ป้องกันปัญหา .git หายไปจาก Workspace (กู้คืน Metadata ของ Git)
+            // ป้องกันปัญหา .git หายไปจาก Workspace
             checkout scm
             
             sh "git -c url.\"https://${G_TOKEN}@github.com/\".insteadOf=\"https://github.com/\" fetch origin ${targetBranch} --depth=100"
@@ -56,7 +56,7 @@ def call(Map params = [:]) {
             def latestSha = sh(script: "git rev-parse --short HEAD", returnStdout: true).trim()
             def firstAuthor = sh(script: "git log FETCH_HEAD..HEAD --no-merges --reverse -1 --pretty=%an", returnStdout: true).trim()
             
-            // 4. สร้าง PR Body (เขียนลงไฟล์เพื่อป้องกัน Shell Error)
+            // 4. สร้าง PR Body (เขียนลงไฟล์)
             def prBody = """
 ## 🚀 Promotion Request: ${projectName}
 
@@ -84,27 +84,28 @@ ${commitList}
 *🤖 สร้าง/อัปเดตอัตโนมัติโดย Jenkins Shared Library*
 """.trim()
 
-            // เขียน Body ลงไฟล์ชั่วคราว
             writeFile file: 'pr_body.txt', text: prBody
-            def prTitle = "[${projectName}] Promotion: ${currentEnv} -> ${nextEnv} (${commitCount} commits)"
+            
+            // 5. ส่งค่าผ่าน Environment Variables เพื่อหลีกเลี่ยงปัญหา Shell Escaping
+            env.PR_TITLE = "[${projectName}] Promotion: ${currentEnv} -> ${nextEnv} (${commitCount} commits)"
+            env.PR_COMMENT_BODY = "📌 **Jenkins Update**: พบโค้ดใหม่ (${commitCount} รายการ) พร้อมสำหรับการส่งงานต่อ"
 
-            // 5. ตรวจสอบและจัดการ PR
+            // 6. ตรวจสอบและจัดการ PR
             echo "📡 [PR Manager] ตรวจสอบสถานะ PR บน GitHub..."
             def existingPR = sh(script: "gh pr list --base ${targetBranch} --head ${currentBranch} --state open --json number --jq '.[0].number'", returnStdout: true).trim()
 
             if (existingPR && existingPR != "null" && existingPR != "") {
                 echo "🔄 [PR Manager] อัปเดต PR #${existingPR}..."
-                sh "gh pr edit '${existingPR}' --title '${prTitle}' --body-file pr_body.txt"
-                sh "gh pr comment '${existingPR}' --body '📌 **Jenkins Update**: พบโค้ดใหม่ (${commitCount} รายการ) พร้อมสำหรับการส่งงานต่อ'"
+                // ใช้ double-quote ครอบตัวแปร env (ที่เป็น $) เพื่อให้ Shell อ่านค่าตรงๆ
+                sh "gh pr edit \"${existingPR}\" --title \"\$PR_TITLE\" --body-file pr_body.txt"
+                sh "gh pr comment \"${existingPR}\" --body \"\$PR_COMMENT_BODY\""
                 echo "✅ [PR Manager] อัปเดตสำเร็จ"
             } else {
                 echo "✨ [PR Manager] สร้าง PR ใหม่..."
-                // ใช้ --body-file แทนการส่ง String ตรงๆ
-                def prUrl = sh(script: "gh pr create --base '${targetBranch}' --head '${currentBranch}' --title '${prTitle}' --body-file pr_body.txt", returnStdout: true).trim()
+                def prUrl = sh(script: "gh pr create --base \"${targetBranch}\" --head \"${currentBranch}\" --title \"\$PR_TITLE\" --body-file pr_body.txt", returnStdout: true).trim()
                 echo "✅ [PR Manager] สร้างสำเร็จ: ${prUrl}"
             }
             
-            // ลบไฟล์ชั่วคราวหลังใช้งานเสร็จ
             sh "rm -f pr_body.txt"
         }
     } catch (Exception e) {
